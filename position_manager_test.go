@@ -410,6 +410,62 @@ func TestPositionManagerCapsOpeningsToAvailableExposure(t *testing.T) {
 	}
 }
 
+func TestPositionManagerReservesAvailableMarginBuffer(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 50, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:          0.20,
+		MinExpectedEdge:       0,
+		MinOrderDelta:         0,
+		AvailableMarginBuffer: 0.10,
+		AssetManager:          assets,
+		InstrumentManager:     instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected buffered capped opening, got %+v", orders)
+	}
+	if orderBudgetCost(orders[0])-0.045 > 1e-9 || orders[0].SizeDelta >= 0.045 {
+		t.Fatalf("expected opening plus fees capped to 90%% of available exposure, got %+v", orders[0])
+	}
+}
+
+func TestPositionManagerSuppressesOpeningWhenBufferedBudgetCannotFundNextLot(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 50, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 0.5, MinSize: 0.5, TickSize: 0.1,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:          0.20,
+		MinExpectedEdge:       0,
+		MinOrderDelta:         0,
+		AvailableMarginBuffer: 0.10,
+		AssetManager:          assets,
+		InstrumentManager:     instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 {
+		t.Fatalf("expected opening below the next executable lot to be suppressed, got %+v", orders)
+	}
+}
+
 func TestPositionManagerStats(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 800, Used: 200, Equity: 1000})

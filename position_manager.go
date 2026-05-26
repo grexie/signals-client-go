@@ -10,17 +10,18 @@ import (
 )
 
 const (
-	DefaultMakerFeeRate         = 0.0002
-	DefaultTakerFeeRate         = 0.0005
-	DefaultPositionSize         = 1.0
-	DefaultMinExpectedEdge      = 0.0045
-	DefaultMinOrderDelta        = 0.20
-	DefaultRebalanceInterval    = 6 * time.Hour
-	DefaultMinimumLeverage      = 1.0
-	DefaultMaximumLeverage      = 1.0
-	portfolioPositionBudget     = 1.0
-	floatTolerance              = 1e-9
-	defaultPositionOrderChannel = 128
+	DefaultMakerFeeRate          = 0.0002
+	DefaultTakerFeeRate          = 0.0005
+	DefaultPositionSize          = 1.0
+	DefaultMinExpectedEdge       = 0.0045
+	DefaultMinOrderDelta         = 0.20
+	DefaultRebalanceInterval     = 6 * time.Hour
+	DefaultMinimumLeverage       = 1.0
+	DefaultMaximumLeverage       = 1.0
+	DefaultAvailableMarginBuffer = 0.10
+	portfolioPositionBudget      = 1.0
+	floatTolerance               = 1e-9
+	defaultPositionOrderChannel  = 128
 )
 
 // InstrumentConfig overrides fees and leverage limits for one instrument.
@@ -33,32 +34,34 @@ type InstrumentConfig struct {
 
 // PositionManagerConfig controls fee-aware sizing and leverage selection.
 type PositionManagerConfig struct {
-	PositionSize      float64
-	MinExpectedEdge   float64
-	MinOrderDelta     float64
-	RebalanceInterval time.Duration
-	MakerFeeRate      float64
-	TakerFeeRate      float64
-	MinLeverage       float64
-	MaxLeverage       float64
-	Instruments       map[string]InstrumentConfig
-	AssetManager      *AssetManager
-	InstrumentManager *InstrumentManager
+	PositionSize          float64
+	MinExpectedEdge       float64
+	MinOrderDelta         float64
+	RebalanceInterval     time.Duration
+	MakerFeeRate          float64
+	TakerFeeRate          float64
+	MinLeverage           float64
+	MaxLeverage           float64
+	AvailableMarginBuffer float64
+	Instruments           map[string]InstrumentConfig
+	AssetManager          *AssetManager
+	InstrumentManager     *InstrumentManager
 }
 
 // ProductionPositionManagerConfig returns the same execution-policy defaults
 // used by the Grexie Signals server.
 func ProductionPositionManagerConfig() PositionManagerConfig {
 	return PositionManagerConfig{
-		PositionSize:      DefaultPositionSize,
-		MinExpectedEdge:   DefaultMinExpectedEdge,
-		MinOrderDelta:     DefaultMinOrderDelta,
-		RebalanceInterval: DefaultRebalanceInterval,
-		MakerFeeRate:      DefaultMakerFeeRate,
-		TakerFeeRate:      DefaultTakerFeeRate,
-		MinLeverage:       DefaultMinimumLeverage,
-		MaxLeverage:       DefaultMaximumLeverage,
-		Instruments:       map[string]InstrumentConfig{},
+		PositionSize:          DefaultPositionSize,
+		MinExpectedEdge:       DefaultMinExpectedEdge,
+		MinOrderDelta:         DefaultMinOrderDelta,
+		RebalanceInterval:     DefaultRebalanceInterval,
+		MakerFeeRate:          DefaultMakerFeeRate,
+		TakerFeeRate:          DefaultTakerFeeRate,
+		MinLeverage:           DefaultMinimumLeverage,
+		MaxLeverage:           DefaultMaximumLeverage,
+		AvailableMarginBuffer: DefaultAvailableMarginBuffer,
+		Instruments:           map[string]InstrumentConfig{},
 	}
 }
 
@@ -827,7 +830,11 @@ func (pm *PositionManager) availableExposureBudget(currency string) float64 {
 	if asset.Available <= 0 {
 		return 0
 	}
-	return math.Max(0, asset.Available/equity)
+	budget := math.Max(0, asset.Available/equity)
+	if pm.cfg.AvailableMarginBuffer > 0 {
+		budget *= 1 - pm.cfg.AvailableMarginBuffer
+	}
+	return budget
 }
 
 func (pm *PositionManager) executableAllocationForBudget(key string, pos *Position, budget float64, context signalContext) executableAllocation {
@@ -1192,6 +1199,12 @@ func normalizePositionManagerConfig(cfg PositionManagerConfig) PositionManagerCo
 	}
 	if cfg.MaxLeverage <= 0 {
 		cfg.MaxLeverage = DefaultMaximumLeverage
+	}
+	if cfg.AvailableMarginBuffer < 0 {
+		cfg.AvailableMarginBuffer = 0
+	}
+	if cfg.AvailableMarginBuffer > 0.95 {
+		cfg.AvailableMarginBuffer = 0.95
 	}
 	if cfg.Instruments == nil {
 		cfg.Instruments = map[string]InstrumentConfig{}

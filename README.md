@@ -63,7 +63,8 @@ The server sends `ReadyEvent`, `SubscribedEvent`, `UnsubscribedEvent`, `InfoEven
 - openings and increases are capped by live `AssetManager` available exposure when asset snapshots are attached;
 - `MinOrderDelta` is scaled by `PositionSize`, so a `0.20` delta with a `0.10` budget means a `0.02` minimum order;
 - same-side churn can be suppressed by `RebalanceInterval`, while opposite-side signals can still flip positions;
-- fees are applied to order recommendations and realized PnL.
+- fees are applied to order recommendations and realized PnL;
+- `AvailableMarginBuffer` reserves part of available margin before sizing openings, and openings are capped or suppressed when the buffered budget cannot fund the next executable lot/min-size step including fees.
 
 ```go
 manager := signalsclient.NewPositionManager(client, signalsclient.PositionManagerConfig{
@@ -75,6 +76,7 @@ manager := signalsclient.NewPositionManager(client, signalsclient.PositionManage
 	TakerFeeRate:      0.0005,
 	MinLeverage:       1,
 	MaxLeverage:       3,
+	AvailableMarginBuffer: 0.10,
 	Instruments: map[string]signalsclient.InstrumentConfig{
 		"okx:BTC-USDT-SWAP": {TakerFeeRate: 0.00045, MaxLeverage: 5},
 	},
