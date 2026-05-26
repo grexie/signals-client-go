@@ -241,21 +241,31 @@ func (pm *PositionManager) Run(ctx context.Context) error {
 	if pm.client == nil {
 		return errors.New("signalsclient: PositionManager has no SignalsClient")
 	}
+	events, errs := pm.client.SubscribeEvents(ctx)
 	for {
-		ev, err := pm.client.Receive(ctx)
-		if err != nil {
-			return err
-		}
-		orders, err := pm.HandleEvent(ev)
-		if err != nil {
-			return err
-		}
-		for _, order := range orders {
-			select {
-			case pm.orders <- order:
-			case <-ctx.Done():
-				return ctx.Err()
+		select {
+		case ev, ok := <-events:
+			if !ok {
+				return nil
 			}
+			orders, err := pm.HandleEvent(ev)
+			if err != nil {
+				return err
+			}
+			for _, order := range orders {
+				select {
+				case pm.orders <- order:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		case err, ok := <-errs:
+			if !ok {
+				return nil
+			}
+			return err
+		case <-ctx.Done():
+			return ctx.Err()
 		}
 	}
 }
@@ -463,6 +473,9 @@ func (pm *PositionManager) HandleEvent(ev Event) ([]Order, error) {
 	if signal.Timestamp.IsZero() {
 		signal.Timestamp = signalEvent.Timestamp
 	}
+	if signalEvent.Replay {
+		return nil, nil
+	}
 	orders, err := pm.HandleSignal(signal)
 	for i := range orders {
 		orders[i].Subscription = signalEvent.SubscriptionID
@@ -476,6 +489,9 @@ func (pm *PositionManager) HandleEvent(ev Event) ([]Order, error) {
 func (pm *PositionManager) HandleSignal(signal Signal) ([]Order, error) {
 	if signal.Venue == "" || signal.Instrument == "" {
 		return nil, errors.New("signalsclient: signal venue and instrument are required")
+	}
+	if _, ok := pm.instruments.Instrument(signal.Venue, signal.Instrument); !ok {
+		return nil, nil
 	}
 	now := signal.Timestamp
 	if now.IsZero() {

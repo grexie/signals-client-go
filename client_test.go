@@ -104,6 +104,40 @@ func TestSignalsClientSubscribe(t *testing.T) {
 	}
 }
 
+func TestSignalsClientFansOutEvents(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"type": "ready", "message": "ok"})
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client := NewSignalsClient("ws_test", WithURL(wsURL))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	first, _ := client.SubscribeEvents(ctx)
+	second, _ := client.SubscribeEvents(ctx)
+	if err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for name, events := range map[string]<-chan Event{"first": first, "second": second} {
+		select {
+		case ev := <-events:
+			if ev.EventType() != "ready" {
+				t.Fatalf("%s subscriber got unexpected event %#v", name, ev)
+			}
+		case <-ctx.Done():
+			t.Fatalf("%s subscriber did not receive fan-out event: %v", name, ctx.Err())
+		}
+	}
+}
+
 func TestSignalsClientUnsubscribe(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	requests := make(chan map[string]any, 1)

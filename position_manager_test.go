@@ -15,6 +15,7 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 		MinLeverage:       1,
 		MaxLeverage:       5,
 	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
 	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	buyOrders, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.8,
@@ -50,6 +51,7 @@ func TestPositionManagerScalesMinOrderDeltaToPositionSize(t *testing.T) {
 		MinExpectedEdge: 0,
 		MinOrderDelta:   0.20,
 	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "ETH-USDT-SWAP"})
 	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
 	rejected, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 0.15,
@@ -79,6 +81,7 @@ func TestPositionManagerFeeAwareEdgeGate(t *testing.T) {
 		MinExpectedEdge: 0.0045,
 		TakerFeeRate:    0.0005,
 	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "DOGE-USDT-SWAP"})
 	orders, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "DOGE-USDT-SWAP", Side: SideBuy, Confidence: 0.67,
 		TakeProfit: 0.006, StopLoss: 0.004, Price: 0.2,
@@ -88,6 +91,106 @@ func TestPositionManagerFeeAwareEdgeGate(t *testing.T) {
 	}
 	if len(orders) != 0 {
 		t.Fatalf("expected fee-aware edge gate to reject marginal signal: %+v", orders)
+	}
+}
+
+func TestPositionManagerIgnoresUnconfiguredSignals(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:    0.10,
+		MinExpectedEdge: 0,
+		MinOrderDelta:   0,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "SOL-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 || len(pm.Positions()) != 0 {
+		t.Fatalf("expected unconfigured signal to be ignored, orders=%+v positions=%+v", orders, pm.Positions())
+	}
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "SOL-USDT-SWAP"})
+	orders, err = pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "SOL-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected configured signal to create an order, got %+v", orders)
+	}
+}
+
+func TestPositionManagerIgnoresReplayEvents(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:    0.10,
+		MinExpectedEdge: 0,
+		MinOrderDelta:   0,
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	ev := SignalEvent{
+		SubscriptionID: 3,
+		Venue:          "okx",
+		Instrument:     "BTC-USDT-SWAP",
+		Replay:         true,
+		Signal: Signal{
+			Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+			TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+		},
+	}
+	orders, err := pm.HandleEvent(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 || len(pm.Positions()) != 0 {
+		t.Fatalf("expected replay event to be ignored, orders=%+v positions=%+v", orders, pm.Positions())
+	}
+	ev.Replay = false
+	orders, err = pm.HandleEvent(ev)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected live event to create an order, got %+v", orders)
+	}
+}
+
+func TestPositionManagerLeverageAdaptsWithinConfiguredCaps(t *testing.T) {
+	leverageFor := func(instrument string, confidence, takeProfit, score float64) float64 {
+		pm := NewPositionManager(nil, PositionManagerConfig{
+			PositionSize:    1,
+			MinExpectedEdge: 0,
+			MinOrderDelta:   0,
+			MinLeverage:     1,
+			MaxLeverage:     5,
+		})
+		pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: instrument})
+		orders, err := pm.HandleSignal(Signal{
+			Venue: "okx", Instrument: instrument, Side: SideBuy, Confidence: confidence,
+			TakeProfit: takeProfit, StopLoss: 0, Score: score, Price: 100,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(orders) != 1 {
+			t.Fatalf("expected one order for %s, got %+v", instrument, orders)
+		}
+		return orders[0].Leverage
+	}
+
+	low := leverageFor("LOW-USDT-SWAP", 0.2, 0, 0)
+	scored := leverageFor("SCORE-USDT-SWAP", 0.2, 0, 1)
+	high := leverageFor("HIGH-USDT-SWAP", 1, 0.02, 1)
+	if low < 1 || high > 5 {
+		t.Fatalf("expected leverage inside [1,5], low=%.8f high=%.8f", low, high)
+	}
+	if scored <= low {
+		t.Fatalf("expected score to increase leverage, low=%.8f scored=%.8f", low, scored)
+	}
+	if math.Abs(high-5) > 1e-9 {
+		t.Fatalf("expected max-confidence leverage to hit cap, got %.8f", high)
 	}
 }
 

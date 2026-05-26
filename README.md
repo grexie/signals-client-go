@@ -3,7 +3,7 @@
 Typed Go client for Grexie Signals websocket subscriptions and in-memory position management.
 
 ```sh
-go get github.com/grexie/signals-client-go@v0.1.0
+go get github.com/grexie/signals-client-go@v0.1.1
 ```
 
 ## Websocket Client
@@ -77,12 +77,17 @@ manager := signalsclient.NewPositionManager(client, signalsclient.PositionManage
 		"okx:BTC-USDT-SWAP": {TakerFeeRate: 0.00045, MaxLeverage: 5},
 	},
 })
+manager.InstrumentManager().UpdateInstrument(signalsclient.InstrumentMetadata{
+	Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT",
+})
 
 orders, err := manager.HandleSignal(signalsclient.Signal{
 	Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: signalsclient.SideBuy,
 	Confidence: 0.82, TakeProfit: 0.012, StopLoss: 0.004, Price: 68000,
 })
 ```
+
+`PositionManager` ignores replay signal events and ignores live signals whose venue/instrument pair has not been configured in its `InstrumentManager`. `Run` uses an independent event subscription, so multiple position managers can share one `SignalsClient`.
 
 The manager can also be run directly against a client:
 

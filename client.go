@@ -81,11 +81,18 @@ type SignalsClient struct {
 	token SignalsWebSocketToken
 	cfg   clientConfig
 
-	mu      sync.Mutex
-	writeMu sync.Mutex
-	conn    *websocket.Conn
-	done    chan struct{}
+	mu            sync.Mutex
+	writeMu       sync.Mutex
+	subMu         sync.Mutex
+	conn          *websocket.Conn
+	done          chan struct{}
+	subscriptions map[*eventSubscription]struct{}
 
+	events chan Event
+	errors chan error
+}
+
+type eventSubscription struct {
 	events chan Event
 	errors chan error
 }
@@ -102,11 +109,12 @@ func NewSignalsClient(token SignalsWebSocketToken, opts ...ClientOption) *Signal
 		opt(&cfg)
 	}
 	return &SignalsClient{
-		token:  token,
-		cfg:    cfg,
-		done:   make(chan struct{}),
-		events: make(chan Event, cfg.bufferSize),
-		errors: make(chan error, cfg.bufferSize),
+		token:         token,
+		cfg:           cfg,
+		done:          make(chan struct{}),
+		events:        make(chan Event, cfg.bufferSize),
+		errors:        make(chan error, cfg.bufferSize),
+		subscriptions: make(map[*eventSubscription]struct{}),
 	}
 }
 
@@ -158,12 +166,47 @@ func (c *SignalsClient) Errors() <-chan error {
 	return c.errors
 }
 
+// SubscribeEvents returns an independent fan-out stream of events for one
+// consumer. Use this when several components, such as multiple PositionManager
+// instances, share one SignalsClient.
+func (c *SignalsClient) SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error) {
+	sub := &eventSubscription{
+		events: make(chan Event, c.cfg.bufferSize),
+		errors: make(chan error, c.cfg.bufferSize),
+	}
+	c.subMu.Lock()
+	c.subscriptions[sub] = struct{}{}
+	c.subMu.Unlock()
+	go func() {
+		<-ctx.Done()
+		c.removeSubscription(sub)
+	}()
+	return sub.events, sub.errors
+}
+
+func (c *SignalsClient) removeSubscription(sub *eventSubscription) {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	if _, ok := c.subscriptions[sub]; !ok {
+		return
+	}
+	delete(c.subscriptions, sub)
+	close(sub.events)
+	close(sub.errors)
+}
+
 // Receive waits for the next event or error.
 func (c *SignalsClient) Receive(ctx context.Context) (Event, error) {
 	select {
-	case ev := <-c.events:
+	case ev, ok := <-c.events:
+		if !ok {
+			return nil, errors.New("signalsclient: websocket event stream is closed")
+		}
 		return ev, nil
-	case err := <-c.errors:
+	case err, ok := <-c.errors:
+		if !ok {
+			return nil, errors.New("signalsclient: websocket error stream is closed")
+		}
 		return nil, err
 	case <-ctx.Done():
 		return nil, ctx.Err()
@@ -223,31 +266,72 @@ func (c *SignalsClient) writeJSON(ctx context.Context, payload any) error {
 }
 
 func (c *SignalsClient) readLoop(conn *websocket.Conn, done <-chan struct{}) {
-	defer close(c.events)
-	defer close(c.errors)
+	defer c.closeStreams()
 	for {
 		_, data, err := conn.ReadMessage()
 		if err != nil {
-			select {
-			case <-done:
-				return
-			case c.errors <- err:
+			if c.broadcastError(err, done) {
 				return
 			}
+			return
 		}
 		ev, err := ParseEvent(data)
 		if err != nil {
-			select {
-			case c.errors <- err:
-			case <-done:
+			if c.broadcastError(err, done) {
 				return
 			}
 			continue
 		}
-		select {
-		case c.events <- ev:
-		case <-done:
+		if c.broadcastEvent(ev, done) {
 			return
 		}
+	}
+}
+
+func (c *SignalsClient) broadcastEvent(ev Event, done <-chan struct{}) bool {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	select {
+	case c.events <- ev:
+	case <-done:
+		return true
+	}
+	for sub := range c.subscriptions {
+		select {
+		case sub.events <- ev:
+		case <-done:
+			return true
+		}
+	}
+	return false
+}
+
+func (c *SignalsClient) broadcastError(err error, done <-chan struct{}) bool {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	select {
+	case c.errors <- err:
+	case <-done:
+		return true
+	}
+	for sub := range c.subscriptions {
+		select {
+		case sub.errors <- err:
+		case <-done:
+			return true
+		}
+	}
+	return false
+}
+
+func (c *SignalsClient) closeStreams() {
+	c.subMu.Lock()
+	defer c.subMu.Unlock()
+	close(c.events)
+	close(c.errors)
+	for sub := range c.subscriptions {
+		close(sub.events)
+		close(sub.errors)
+		delete(c.subscriptions, sub)
 	}
 }
