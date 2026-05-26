@@ -307,7 +307,7 @@ func (pm *PositionManager) ClosePosition(venue, instrument string) ([]Order, err
 	if !pm.orderMeetsInstrumentMinimum(order) {
 		return nil, nil
 	}
-	pm.applyPositionDeltaLocked(key, pos, delta, price, pm.takerFeeRate(key), now)
+	pm.applyPositionDeltaLocked(key, pos, order.SizeDelta, price, pm.takerFeeRate(key), now)
 	return []Order{order}, nil
 }
 
@@ -448,12 +448,15 @@ func (pm *PositionManager) UpdatePrice(venue, instrument string, price float64, 
 	delta := -pos.Size
 	order := pm.orderForDeltaLocked(key, pos, delta, 0, 0, reason, timestamp, 0, false)
 	order.FeeRate = feeRate
-	order.EstimatedFee = math.Abs(delta) * feeRate
+	metadata := pm.instrumentMetadataForKey(key, pos.Venue, pos.Instrument)
+	asset, _ := pm.assets.Asset(metadata.SettlementCurrency)
+	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, 1)
+	order.EstimatedFee = feeExposureForNotional(order.Notional, feeRate, equity)
 	order.EstimatedFeeValue = order.Notional * feeRate
 	if !pm.orderMeetsInstrumentMinimum(order) {
 		return nil, nil
 	}
-	pm.applyPositionDeltaLocked(key, pos, delta, price, feeRate, timestamp)
+	pm.applyPositionDeltaLocked(key, pos, order.SizeDelta, price, feeRate, timestamp)
 	return []Order{order}, nil
 }
 
@@ -511,7 +514,7 @@ func (pm *PositionManager) HandleSignal(signal Signal) ([]Order, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	pos := pm.positions[key]
-	targetSize := targetSign * pm.cfg.PositionSize * targetConfidence
+	targetSize := targetSign * pm.cfg.PositionSize
 	minOrderDelta := pm.effectiveMinOrderDelta()
 	if pos == nil || math.Abs(pos.Size) <= floatTolerance {
 		if math.Abs(targetSize) < minOrderDelta {
@@ -570,7 +573,6 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 	}
 	weights := make(map[string]float64, len(pm.positions))
 	sides := make(map[string]float64, len(pm.positions))
-	totalWeight := 0.0
 	for key, pos := range pm.positions {
 		if pos == nil || math.Abs(pos.Size) <= floatTolerance && pos.Confidence <= 0 {
 			continue
@@ -591,15 +593,14 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 		}
 		weights[key] = weight
 		sides[key] = side
-		totalWeight += weight
 	}
 
-	usedBudget := math.Min(pm.cfg.PositionSize, totalWeight)
 	keys := make([]string, 0, len(pm.positions))
 	for key := range pm.positions {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	targets := pm.allocateTargetSizesLocked(keys, weights, sides, signalContexts)
 	reductions := make([]rebalanceCandidate, 0)
 	openings := make([]rebalanceCandidate, 0)
 	for _, key := range keys {
@@ -607,10 +608,7 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 		if pos == nil {
 			continue
 		}
-		targetSize := 0.0
-		if totalWeight > 0 {
-			targetSize = sides[key] * usedBudget * weights[key] / totalWeight
-		}
+		targetSize := targets[key]
 		delta := targetSize - pos.Size
 		if isFlipTarget(pos.Size, targetSize) {
 			delta = -pos.Size
@@ -646,6 +644,121 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 	return pm.materializeRebalanceOrdersLocked(openings, now, map[string]float64{})
 }
 
+func (pm *PositionManager) allocateTargetSizesLocked(keys []string, weights map[string]float64, sides map[string]float64, signalContexts map[string]signalContext) map[string]float64 {
+	targets := make(map[string]float64, len(keys))
+	if pm.cfg.PositionSize <= 0 {
+		return targets
+	}
+	active := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		if weights[key] > floatTolerance && sides[key] != 0 {
+			active[key] = struct{}{}
+		}
+	}
+	for len(active) > 0 {
+		totalWeight := 0.0
+		for key := range active {
+			totalWeight += weights[key]
+		}
+		if totalWeight <= floatTolerance {
+			break
+		}
+		dropped := ""
+		droppedWeight := math.Inf(1)
+		for _, key := range keys {
+			if _, ok := active[key]; !ok {
+				continue
+			}
+			pos := pm.positions[key]
+			if pos == nil {
+				continue
+			}
+			desiredBudget := pm.cfg.PositionSize * weights[key] / totalWeight
+			if executable := pm.executableAllocationForBudget(key, pos, desiredBudget, signalContexts[key]); executable.margin > floatTolerance {
+				continue
+			}
+			if weights[key] < droppedWeight || (math.Abs(weights[key]-droppedWeight) <= floatTolerance && (dropped == "" || key < dropped)) {
+				dropped = key
+				droppedWeight = weights[key]
+			}
+		}
+		if dropped == "" {
+			break
+		}
+		delete(active, dropped)
+	}
+	if len(active) == 0 {
+		return targets
+	}
+
+	totalWeight := 0.0
+	for key := range active {
+		totalWeight += weights[key]
+	}
+	if totalWeight <= floatTolerance {
+		return targets
+	}
+	allocated := 0.0
+	for _, key := range keys {
+		if _, ok := active[key]; !ok {
+			continue
+		}
+		pos := pm.positions[key]
+		if pos == nil {
+			continue
+		}
+		desiredBudget := pm.cfg.PositionSize * weights[key] / totalWeight
+		executable := pm.executableAllocationForBudget(key, pos, desiredBudget, signalContexts[key])
+		if executable.margin <= floatTolerance {
+			continue
+		}
+		targets[key] = sides[key] * executable.margin
+		allocated += executable.margin + executable.fee
+	}
+
+	free := pm.cfg.PositionSize - allocated
+	if free <= floatTolerance {
+		return targets
+	}
+	priority := append([]string(nil), keys...)
+	sort.Slice(priority, func(i, j int) bool {
+		wi := weights[priority[i]]
+		wj := weights[priority[j]]
+		if math.Abs(wi-wj) <= floatTolerance {
+			return priority[i] < priority[j]
+		}
+		return wi > wj
+	})
+	for _, key := range priority {
+		if _, ok := active[key]; !ok || free <= floatTolerance {
+			continue
+		}
+		pos := pm.positions[key]
+		if pos == nil {
+			continue
+		}
+		marginStep, feeStep := pm.executableLotStepCost(key, pos, signalContexts[key])
+		stepCost := marginStep + feeStep
+		if stepCost <= floatTolerance {
+			targets[key] += sides[key] * free
+			free = 0
+			break
+		}
+		steps := math.Floor((free + floatTolerance) / stepCost)
+		if steps <= 0 {
+			continue
+		}
+		targets[key] += sides[key] * steps * marginStep
+		free -= steps * stepCost
+	}
+	return targets
+}
+
+type executableAllocation struct {
+	margin float64
+	fee    float64
+}
+
 type rebalanceCandidate struct {
 	key     string
 	pos     *Position
@@ -670,8 +783,10 @@ func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalan
 				candidate.pos.Confidence = candidate.weight
 				continue
 			}
-			if math.Abs(delta) > available {
-				delta = sign(delta) * available
+			delta = pm.capOpeningDeltaToBudget(candidate.key, candidate.pos, delta, candidate.context, available)
+			if math.Abs(delta) <= floatTolerance {
+				candidate.pos.Confidence = candidate.weight
+				continue
 			}
 		}
 		order := pm.orderForDeltaLocked(candidate.key, candidate.pos, delta, candidate.context.expectedEdge, candidate.context.score, candidate.reason, now, candidate.context.confidence, false)
@@ -683,13 +798,13 @@ func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalan
 		}
 		orders = append(orders, order)
 		if openingExposureByCurrency != nil && !isExposureReduction(order.PreviousSize, order.TargetSize) {
-			openingExposureByCurrency[order.SettlementCurrency] += math.Abs(order.SizeDelta)
+			openingExposureByCurrency[order.SettlementCurrency] += orderBudgetCost(order)
 		}
 		price := candidate.pos.LastPrice
 		if price <= 0 {
 			price = candidate.pos.EntryPrice
 		}
-		pm.applyPositionDeltaLocked(candidate.key, candidate.pos, delta, price, pm.takerFeeRate(candidate.key), now)
+		pm.applyPositionDeltaLocked(candidate.key, candidate.pos, order.SizeDelta, price, pm.takerFeeRate(candidate.key), now)
 		if current := pm.positions[candidate.key]; current != nil {
 			current.Confidence = candidate.weight
 		}
@@ -713,6 +828,78 @@ func (pm *PositionManager) availableExposureBudget(currency string) float64 {
 		return 0
 	}
 	return math.Max(0, asset.Available/equity)
+}
+
+func (pm *PositionManager) executableAllocationForBudget(key string, pos *Position, budget float64, context signalContext) executableAllocation {
+	if pos == nil || budget <= floatTolerance {
+		return executableAllocation{}
+	}
+	metadata := pm.instrumentMetadataForKey(key, pos.Venue, pos.Instrument)
+	price := roundToTick(positiveOr(pos.LastPrice, pos.EntryPrice), metadata.TickSize)
+	asset, _ := pm.assets.Asset(metadata.SettlementCurrency)
+	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, 1)
+	leverage := pm.selectLeverage(key, context.confidence, context.expectedEdge, context.score)
+	if price <= 0 || equity <= 0 || leverage <= 0 {
+		return executableAllocation{}
+	}
+	feeRate := pm.takerFeeRate(key)
+	feeMultiplier := 1 + leverage*feeRate
+	if feeMultiplier <= 0 {
+		feeMultiplier = 1
+	}
+	maxMargin := budget / feeMultiplier
+	quantity := roundDownToStep(maxMargin*equity*leverage/price, metadata.LotSize)
+	if quantity <= floatTolerance {
+		return executableAllocation{}
+	}
+	if metadata.MinSize > 0 && quantity < metadata.MinSize {
+		return executableAllocation{}
+	}
+	margin := quantity * price / (equity * leverage)
+	fee := quantity * price * feeRate / equity
+	if margin+fee > budget+floatTolerance {
+		return executableAllocation{}
+	}
+	return executableAllocation{margin: margin, fee: fee}
+}
+
+func (pm *PositionManager) executableLotStepCost(key string, pos *Position, context signalContext) (float64, float64) {
+	if pos == nil {
+		return 0, 0
+	}
+	metadata := pm.instrumentMetadataForKey(key, pos.Venue, pos.Instrument)
+	if metadata.LotSize <= 0 {
+		return 0, 0
+	}
+	price := roundToTick(positiveOr(pos.LastPrice, pos.EntryPrice), metadata.TickSize)
+	asset, _ := pm.assets.Asset(metadata.SettlementCurrency)
+	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, 1)
+	leverage := pm.selectLeverage(key, context.confidence, context.expectedEdge, context.score)
+	if price <= 0 || equity <= 0 || leverage <= 0 {
+		return 0, 0
+	}
+	margin := metadata.LotSize * price / (equity * leverage)
+	fee := metadata.LotSize * price * pm.takerFeeRate(key) / equity
+	return margin, fee
+}
+
+func (pm *PositionManager) capOpeningDeltaToBudget(key string, pos *Position, delta float64, context signalContext, budget float64) float64 {
+	if pos == nil || math.Abs(delta) <= floatTolerance || budget <= floatTolerance {
+		return 0
+	}
+	absDelta := math.Abs(delta)
+	executable := pm.executableAllocationForBudget(key, pos, budget, context)
+	if executable.margin <= floatTolerance {
+		return 0
+	}
+	if executable.margin < absDelta {
+		return sign(delta) * executable.margin
+	}
+	order := pm.orderForDeltaLocked(key, pos, delta, context.expectedEdge, context.score, "budget-check", time.Now().UTC(), context.confidence, false)
+	if orderBudgetCost(order) > budget+floatTolerance {
+		return sign(delta) * executable.margin
+	}
+	return delta
 }
 
 func (pm *PositionManager) shouldSkipRebalanceDelta(pos *Position, targetSize, delta float64, now time.Time, hasOverride bool) bool {
@@ -746,26 +933,35 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 	price := roundToTick(positiveOr(pos.LastPrice, pos.EntryPrice), metadata.TickSize)
 	asset, _ := pm.assets.Asset(metadata.SettlementCurrency)
 	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, 1)
-	notional := math.Abs(delta) * equity * leverage
+	requestedAbsDelta := math.Abs(delta)
+	notional := requestedAbsDelta * equity * leverage
 	quantity := 0.0
 	if price > 0 {
 		quantity = roundDownToStep(notional/price, metadata.LotSize)
 		notional = quantity * price
 	}
+	executableAbsDelta := requestedAbsDelta
+	if equity > 0 && leverage > 0 && price > 0 {
+		executableAbsDelta = notional / (equity * leverage)
+	}
+	if executableAbsDelta > requestedAbsDelta {
+		executableAbsDelta = requestedAbsDelta
+	}
+	executableDelta := sign(delta) * executableAbsDelta
 	return Order{
 		Venue:              pos.Venue,
 		Instrument:         pos.Instrument,
 		Side:               side,
 		Reason:             reason,
-		SizeDelta:          delta,
+		SizeDelta:          executableDelta,
 		PreviousSize:       pos.Size,
-		TargetSize:         pos.Size + delta,
+		TargetSize:         pos.Size + executableDelta,
 		Price:              price,
 		Confidence:         confidence,
 		Score:              score,
 		ExpectedEdge:       edge,
 		FeeRate:            feeRate,
-		EstimatedFee:       math.Abs(delta) * feeRate,
+		EstimatedFee:       feeExposureForNotional(notional, feeRate, equity),
 		EstimatedFeeValue:  notional * feeRate,
 		Quantity:           quantity,
 		Notional:           notional,
@@ -777,6 +973,24 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 		Timestamp:          now,
 		Replay:             replay,
 	}
+}
+
+func orderBudgetCost(order Order) float64 {
+	return math.Abs(order.SizeDelta) + math.Max(0, order.EstimatedFee)
+}
+
+func feeExposureForNotional(notional, feeRate, equity float64) float64 {
+	if notional <= 0 || feeRate <= 0 || equity <= 0 {
+		return 0
+	}
+	return notional * feeRate / equity
+}
+
+func feeExposureForMargin(margin, leverage, feeRate float64) float64 {
+	if margin <= 0 || leverage <= 0 || feeRate <= 0 {
+		return 0
+	}
+	return margin * leverage * feeRate
 }
 
 func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, delta, price, feeRate float64, now time.Time) {
@@ -800,7 +1014,7 @@ func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, d
 		if opened {
 			pos.OpenedAt = now
 		}
-		fee := math.Abs(delta) * feeRate
+		fee := feeExposureForMargin(math.Abs(delta), positiveOr(pos.Leverage, pm.minLeverage(key), 1), feeRate)
 		pos.Fees += fee
 		pos.RealizedPnL -= fee
 		pos.Size += delta
@@ -812,7 +1026,7 @@ func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, d
 	}
 	closing := math.Min(math.Abs(pos.Size), math.Abs(delta))
 	gross := pos.move() * closing
-	fee := closing * feeRate
+	fee := feeExposureForMargin(closing, positiveOr(pos.Leverage, pm.minLeverage(key), 1), feeRate)
 	pos.RealizedGross += gross
 	pos.Fees += fee
 	pos.RealizedPnL += gross - fee
@@ -846,7 +1060,7 @@ func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, d
 	pos.OpenedAt = now
 	pos.Confidence = 0
 	pos.RealizedGross = 0
-	pos.Fees = remaining * pm.takerFeeRate(key)
+	pos.Fees = feeExposureForMargin(remaining, positiveOr(pos.Leverage, pm.minLeverage(key), 1), pm.takerFeeRate(key))
 	pos.RealizedPnL = -pos.Fees
 }
 
@@ -928,13 +1142,13 @@ func (pm *PositionManager) instrumentMetadataForKey(key, venue, instrument strin
 }
 
 func (pm *PositionManager) orderMeetsInstrumentMinimum(order Order) bool {
+	if order.Quantity <= 0 {
+		return false
+	}
 	if order.Reason == "closing" || order.Reason == "flip" {
 		return true
 	}
 	if order.MinSize > 0 && order.Quantity > 0 && order.Quantity < order.MinSize {
-		return false
-	}
-	if order.MinSize > 0 && order.Quantity <= 0 {
 		return false
 	}
 	return true

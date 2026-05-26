@@ -27,8 +27,8 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 	if len(buyOrders) != 1 || buyOrders[0].Side != SideBuy || buyOrders[0].Reason != "opening" {
 		t.Fatalf("unexpected buy orders: %+v", buyOrders)
 	}
-	if math.Abs(buyOrders[0].TargetSize-0.10) > 1e-9 {
-		t.Fatalf("expected target size 0.10, got %.8f", buyOrders[0].TargetSize)
+	if math.Abs(orderBudgetCost(buyOrders[0])-0.10) > 1e-9 {
+		t.Fatalf("expected target plus fees to use 0.10 budget, got %+v", buyOrders[0])
 	}
 	sellOrders, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.9,
@@ -40,7 +40,7 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 	if len(sellOrders) != 1 || sellOrders[0].Side != SideSell || sellOrders[0].Reason != "flip" {
 		t.Fatalf("expected flip close order, got %+v", sellOrders)
 	}
-	if math.Abs(sellOrders[0].TargetSize) > 1e-9 || math.Abs(sellOrders[0].SizeDelta+0.10) > 1e-9 {
+	if math.Abs(sellOrders[0].TargetSize) > 1e-9 || math.Abs(sellOrders[0].SizeDelta+buyOrders[0].TargetSize) > 1e-9 {
 		t.Fatalf("expected first flip phase to close the long only, got %+v", sellOrders[0])
 	}
 	openShort, err := pm.HandleSignal(Signal{
@@ -55,7 +55,7 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 	}
 }
 
-func TestPositionManagerScalesMinOrderDeltaToPositionSize(t *testing.T) {
+func TestPositionManagerUsesConfidenceAsAllocationWeight(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
 		PositionSize:    0.10,
 		MinExpectedEdge: 0,
@@ -63,25 +63,91 @@ func TestPositionManagerScalesMinOrderDeltaToPositionSize(t *testing.T) {
 	})
 	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "ETH-USDT-SWAP"})
 	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
-	rejected, err := pm.HandleSignal(Signal{
+	accepted, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 0.15,
 		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rejected) != 0 {
-		t.Fatalf("expected low-confidence opening below scaled min delta to be rejected: %+v", rejected)
+	if len(accepted) != 1 || math.Abs(orderBudgetCost(accepted[0])-0.10) > 1e-9 {
+		t.Fatalf("expected low-confidence sole signal to use full configured budget, got %+v", accepted)
 	}
-	accepted, err := pm.HandleSignal(Signal{
-		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 0.25,
-		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+}
+
+func TestPositionManagerQuantizesOrderTargetSize(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 1000, Available: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 1, MinSize: 1, TickSize: 0.1,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.50,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.15,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 333,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(accepted) != 1 {
-		t.Fatalf("expected opening above scaled min delta, got %+v", accepted)
+	if len(orders) != 1 {
+		t.Fatalf("expected quantized executable order, got %+v", orders)
+	}
+	if orders[0].Quantity != 1 || math.Abs(orders[0].SizeDelta-0.333) > 1e-9 || math.Abs(orders[0].TargetSize-0.333) > 1e-9 {
+		t.Fatalf("expected size to reflect one executable lot, got %+v", orders[0])
+	}
+}
+
+func TestPositionManagerDropsLowConfidenceInstrumentToFundExecutableHighConfidenceLots(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 1000, Available: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "LOW-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 1, MinSize: 1, TickSize: 0.1,
+	})
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "HIGH-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 1, MinSize: 1, TickSize: 0.1,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.70,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	pm.AddPosition(Position{
+		Venue: "okx", Instrument: "LOW-USDT-SWAP", Size: 0.333, Confidence: 0.1,
+		EntryPrice: 333, LastPrice: 333,
+	})
+
+	reductions, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "HIGH-USDT-SWAP", Side: SideBuy, Confidence: 0.9,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 333,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reductions) != 1 || reductions[0].Instrument != "LOW-USDT-SWAP" || math.Abs(reductions[0].TargetSize) > 1e-9 {
+		t.Fatalf("expected low-confidence instrument to be reduced first, got %+v", reductions)
+	}
+	openings, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "HIGH-USDT-SWAP", Side: SideBuy, Confidence: 0.9,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 333,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openings) != 1 || openings[0].Instrument != "HIGH-USDT-SWAP" || openings[0].Quantity != 2 || math.Abs(openings[0].TargetSize-0.666) > 1e-9 {
+		t.Fatalf("expected freed budget to fund two high-confidence lots, got %+v", openings)
 	}
 }
 
@@ -301,8 +367,9 @@ func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
 	if len(reductions) != 1 || reductions[0].Instrument != "BTC-USDT-SWAP" || reductions[0].Side != SideSell {
 		t.Fatalf("expected BTC reduction before ETH opening, got %+v", reductions)
 	}
-	if math.Abs(reductions[0].TargetSize-0.10) > 1e-9 {
-		t.Fatalf("expected BTC target 0.10, got %+v", reductions[0])
+	expectedBTCTarget := 0.10 / (1 + reductions[0].Leverage*reductions[0].FeeRate)
+	if math.Abs(reductions[0].TargetSize-expectedBTCTarget) > 1e-9 {
+		t.Fatalf("expected BTC target to leave room for fees, got %+v", reductions[0])
 	}
 	openings, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 1,
@@ -338,8 +405,8 @@ func TestPositionManagerCapsOpeningsToAvailableExposure(t *testing.T) {
 	if len(orders) != 1 {
 		t.Fatalf("expected capped opening, got %+v", orders)
 	}
-	if math.Abs(orders[0].SizeDelta-0.05) > 1e-9 || math.Abs(orders[0].TargetSize-0.05) > 1e-9 {
-		t.Fatalf("expected opening capped to available exposure, got %+v", orders[0])
+	if orderBudgetCost(orders[0])-0.05 > 1e-9 || orders[0].SizeDelta >= 0.05 {
+		t.Fatalf("expected opening plus fees capped to available exposure, got %+v", orders[0])
 	}
 }
 
