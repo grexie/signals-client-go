@@ -1,0 +1,187 @@
+package signalsclient
+
+import (
+	"math"
+	"testing"
+	"time"
+)
+
+func TestPositionManagerOpensAndFlips(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.10,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0.20,
+		RebalanceInterval: time.Hour,
+		MinLeverage:       1,
+		MaxLeverage:       5,
+	})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	buyOrders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.8,
+		TakeProfit: 0.02, StopLoss: 0.004, Score: 0.5, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buyOrders) != 1 || buyOrders[0].Side != SideBuy || buyOrders[0].Reason != "opening" {
+		t.Fatalf("unexpected buy orders: %+v", buyOrders)
+	}
+	if math.Abs(buyOrders[0].TargetSize-0.10) > 1e-9 {
+		t.Fatalf("expected target size 0.10, got %.8f", buyOrders[0].TargetSize)
+	}
+	sellOrders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.9,
+		TakeProfit: 0.02, StopLoss: 0.004, Score: -0.6, Price: 99, Timestamp: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sellOrders) != 1 || sellOrders[0].Side != SideSell || sellOrders[0].Reason != "flip" {
+		t.Fatalf("expected flip sell order, got %+v", sellOrders)
+	}
+	if sellOrders[0].SizeDelta >= -0.19 {
+		t.Fatalf("expected sell delta to close long and open short, got %.8f", sellOrders[0].SizeDelta)
+	}
+}
+
+func TestPositionManagerScalesMinOrderDeltaToPositionSize(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:    0.10,
+		MinExpectedEdge: 0,
+		MinOrderDelta:   0.20,
+	})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	rejected, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 0.15,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejected) != 0 {
+		t.Fatalf("expected low-confidence opening below scaled min delta to be rejected: %+v", rejected)
+	}
+	accepted, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 0.25,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(accepted) != 1 {
+		t.Fatalf("expected opening above scaled min delta, got %+v", accepted)
+	}
+}
+
+func TestPositionManagerFeeAwareEdgeGate(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:    1,
+		MinExpectedEdge: 0.0045,
+		TakerFeeRate:    0.0005,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "DOGE-USDT-SWAP", Side: SideBuy, Confidence: 0.67,
+		TakeProfit: 0.006, StopLoss: 0.004, Price: 0.2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 {
+		t.Fatalf("expected fee-aware edge gate to reject marginal signal: %+v", orders)
+	}
+}
+
+func TestAssetAndInstrumentManagersProduceConcreteOrders(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 900, Used: 100, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 0.001, MinSize: 0.002, TickSize: 0.1, MaxLeverage: 2,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.10,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		MinLeverage:       1,
+		MaxLeverage:       5,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100.07,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected one order, got %+v", orders)
+	}
+	order := orders[0]
+	if order.SettlementCurrency != "USDT" {
+		t.Fatalf("unexpected settlement currency: %+v", order)
+	}
+	if math.Abs(order.Price-100.1) > 1e-9 {
+		t.Fatalf("expected tick-rounded price 100.1, got %.8f", order.Price)
+	}
+	if order.Leverage > 2 {
+		t.Fatalf("expected instrument leverage cap to apply, got %.8f", order.Leverage)
+	}
+	if order.Quantity <= 0 || order.Notional <= 0 || order.EstimatedFeeValue <= 0 {
+		t.Fatalf("expected concrete quantity/notional/fee value, got %+v", order)
+	}
+}
+
+func TestPositionManagerRejectsOrdersBelowInstrumentMinSize(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 10})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 0.001, MinSize: 1, TickSize: 0.1,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.01,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 {
+		t.Fatalf("expected below-min order to be rejected, got %+v", orders)
+	}
+}
+
+func TestPositionManagerStats(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 800, Used: 200, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 0.01, MinSize: 0.01, TickSize: 0.01,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{AssetManager: assets, InstrumentManager: instruments})
+	pm.AddPosition(Position{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Size: 0.10, EntryPrice: 100, LastPrice: 110,
+		Leverage: 2, RealizedPnL: 0.01, Fees: 0.001,
+	})
+	stats := pm.Stats()
+	if stats.Equity != 1000 || stats.Available != 800 || stats.Used != 200 {
+		t.Fatalf("unexpected asset stats: %+v", stats)
+	}
+	instrument := stats.ByInstrument["okx:ETH-USDT-SWAP"]
+	if instrument.SettlementCurrency != "USDT" || instrument.Quantity <= 0 || instrument.UnrealizedPnL <= 0 {
+		t.Fatalf("unexpected instrument stats: %+v", instrument)
+	}
+	if stats.RealizedPnLPercent <= 0 || stats.TotalPnLPercent <= 0 {
+		t.Fatalf("expected positive pnl percentages, got %+v", stats)
+	}
+}

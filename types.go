@@ -1,0 +1,195 @@
+package signalsclient
+
+import (
+	"encoding/json"
+	"fmt"
+	"time"
+)
+
+// SignalsWebSocketToken authenticates a websocket connection to Grexie Signals.
+type SignalsWebSocketToken string
+
+// Side is the direction produced by a signal or held by a position.
+type Side string
+
+const (
+	SideBuy  Side = "buy"
+	SideSell Side = "sell"
+)
+
+// SignalComponent describes one timeframe contribution to an aggregate signal.
+type SignalComponent struct {
+	Timeframe   string    `json:"timeframe"`
+	Side        Side      `json:"side"`
+	Confidence  float64   `json:"confidence"`
+	Weight      float64   `json:"weight"`
+	SignedScore float64   `json:"signedScore"`
+	TakeProfit  float64   `json:"takeProfit"`
+	StopLoss    float64   `json:"stopLoss"`
+	Probability []float64 `json:"probability,omitempty"`
+}
+
+// Signal is the public signal payload sent by the Grexie Signals websocket.
+//
+// Price and Timestamp are optional forward-compatible fields. Current server
+// websocket messages carry Timestamp on the envelope; PositionManager will use
+// the event timestamp when HandleEvent is called.
+type Signal struct {
+	Venue      string            `json:"venue"`
+	Instrument string            `json:"instrument"`
+	Timeframe  string            `json:"timeframe,omitempty"`
+	Confidence float64           `json:"confidence"`
+	Side       Side              `json:"side"`
+	TakeProfit float64           `json:"takeProfit"`
+	StopLoss   float64           `json:"stopLoss"`
+	Score      float64           `json:"score,omitempty"`
+	Components []SignalComponent `json:"components,omitempty"`
+	Timestamp  time.Time         `json:"timestamp,omitempty"`
+	Price      float64           `json:"price,omitempty"`
+}
+
+// Event is implemented by every websocket event emitted by SignalsClient.
+type Event interface {
+	EventType() string
+}
+
+// ReadyEvent is sent when the server is ready to receive subscribe messages.
+type ReadyEvent struct {
+	Message string `json:"message"`
+}
+
+func (ReadyEvent) EventType() string { return "ready" }
+
+// SubscribedEvent confirms a subscription and carries the server subscription id.
+type SubscribedEvent struct {
+	SubscriptionID int64  `json:"subscriptionId"`
+	Venue          string `json:"venue"`
+	Instrument     string `json:"instrument"`
+}
+
+func (SubscribedEvent) EventType() string { return "subscribed" }
+
+// UnsubscribedEvent confirms that a subscription has been removed.
+type UnsubscribedEvent struct {
+	SubscriptionID int64  `json:"subscriptionId"`
+	Venue          string `json:"venue"`
+	Instrument     string `json:"instrument"`
+	Code           string `json:"code,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
+func (UnsubscribedEvent) EventType() string { return "unsubscribed" }
+
+// InfoEvent is a user-friendly lifecycle update for an instrument.
+type InfoEvent struct {
+	SubscriptionID int64      `json:"subscriptionId"`
+	Venue          string     `json:"venue"`
+	Instrument     string     `json:"instrument"`
+	Stage          string     `json:"stage"`
+	Message        string     `json:"message"`
+	Timestamp      time.Time  `json:"timestamp"`
+	Replay         bool       `json:"replay,omitempty"`
+	ReplayedAt     *time.Time `json:"replayedAt,omitempty"`
+}
+
+func (InfoEvent) EventType() string { return "info" }
+
+// SignalEvent carries a trading signal for a subscribed venue/instrument pair.
+type SignalEvent struct {
+	SubscriptionID int64      `json:"subscriptionId"`
+	Venue          string     `json:"venue"`
+	Instrument     string     `json:"instrument"`
+	Signal         Signal     `json:"signal"`
+	Timestamp      time.Time  `json:"timestamp"`
+	Replay         bool       `json:"replay,omitempty"`
+	ReplayedAt     *time.Time `json:"replayedAt,omitempty"`
+}
+
+func (SignalEvent) EventType() string { return "signal" }
+
+// ErrorEvent is emitted for protocol, authorization, and server errors.
+type ErrorEvent struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func (ErrorEvent) EventType() string { return "error" }
+
+type serverMessage struct {
+	Type           string          `json:"type"`
+	SubscriptionID int64           `json:"subscriptionId,omitempty"`
+	Venue          string          `json:"venue,omitempty"`
+	Instrument     string          `json:"instrument,omitempty"`
+	Code           string          `json:"code,omitempty"`
+	Message        string          `json:"message,omitempty"`
+	Stage          string          `json:"stage,omitempty"`
+	Timestamp      *time.Time      `json:"timestamp,omitempty"`
+	Replay         bool            `json:"replay,omitempty"`
+	ReplayedAt     *time.Time      `json:"replayedAt,omitempty"`
+	Signal         json.RawMessage `json:"signal,omitempty"`
+}
+
+// ParseEvent decodes one raw websocket JSON message into the corresponding
+// typed event.
+func ParseEvent(data []byte) (Event, error) {
+	var msg serverMessage
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return nil, err
+	}
+	switch msg.Type {
+	case "ready":
+		return ReadyEvent{Message: msg.Message}, nil
+	case "subscribed":
+		return SubscribedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, Instrument: msg.Instrument}, nil
+	case "unsubscribed":
+		return UnsubscribedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, Instrument: msg.Instrument, Code: msg.Code, Message: msg.Message}, nil
+	case "info":
+		ts := time.Time{}
+		if msg.Timestamp != nil {
+			ts = *msg.Timestamp
+		}
+		return InfoEvent{
+			SubscriptionID: msg.SubscriptionID,
+			Venue:          msg.Venue,
+			Instrument:     msg.Instrument,
+			Stage:          msg.Stage,
+			Message:        msg.Message,
+			Timestamp:      ts,
+			Replay:         msg.Replay,
+			ReplayedAt:     msg.ReplayedAt,
+		}, nil
+	case "signal":
+		var signal Signal
+		if len(msg.Signal) > 0 {
+			if err := json.Unmarshal(msg.Signal, &signal); err != nil {
+				return nil, err
+			}
+		}
+		if signal.Venue == "" {
+			signal.Venue = msg.Venue
+		}
+		if signal.Instrument == "" {
+			signal.Instrument = msg.Instrument
+		}
+		if msg.Timestamp != nil && signal.Timestamp.IsZero() {
+			signal.Timestamp = *msg.Timestamp
+		}
+		ts := signal.Timestamp
+		if ts.IsZero() && msg.Timestamp != nil {
+			ts = *msg.Timestamp
+		}
+		return SignalEvent{
+			SubscriptionID: msg.SubscriptionID,
+			Venue:          msg.Venue,
+			Instrument:     msg.Instrument,
+			Signal:         signal,
+			Timestamp:      ts,
+			Replay:         msg.Replay,
+			ReplayedAt:     msg.ReplayedAt,
+		}, nil
+	case "error":
+		return ErrorEvent{Code: msg.Code, Message: msg.Message}, nil
+	default:
+		return nil, fmt.Errorf("signalsclient: unsupported websocket event type %q", msg.Type)
+	}
+}
