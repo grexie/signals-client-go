@@ -34,6 +34,13 @@ type InstrumentConfig struct {
 	MaxLeverage  float64
 }
 
+// EventSource is the narrow event stream dependency consumed by
+// PositionManager. SignalsClient implements it, and servers/tests can provide
+// their own in-process signal distributor.
+type EventSource interface {
+	SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error)
+}
+
 // PositionManagerConfig controls fee-aware sizing and leverage selection.
 type PositionManagerConfig struct {
 	PositionSize           float64
@@ -129,6 +136,7 @@ type Order struct {
 	Leverage           float64
 	TakeProfit         float64
 	StopLoss           float64
+	ReduceOnly         bool
 	Timestamp          time.Time
 	Subscription       int64
 	Replay             bool
@@ -199,7 +207,7 @@ type CurrencyPositionStats struct {
 
 // PositionManager consumes signal events and maintains an in-memory portfolio.
 type PositionManager struct {
-	client      *SignalsClient
+	client      EventSource
 	cfg         PositionManagerConfig
 	assets      *AssetManager
 	instruments *InstrumentManager
@@ -212,7 +220,7 @@ type PositionManager struct {
 
 // NewPositionManager creates an in-memory manager. Pass nil as client when
 // feeding signals manually via HandleSignal.
-func NewPositionManager(client *SignalsClient, cfg PositionManagerConfig) *PositionManager {
+func NewPositionManager(client EventSource, cfg PositionManagerConfig) *PositionManager {
 	cfg = normalizePositionManagerConfig(cfg)
 	assets := cfg.AssetManager
 	if assets == nil {
@@ -246,7 +254,7 @@ func (pm *PositionManager) Orders() <-chan Order {
 // Run consumes events from the associated SignalsClient until the context ends.
 func (pm *PositionManager) Run(ctx context.Context) error {
 	if pm.client == nil {
-		return errors.New("signalsclient: PositionManager has no SignalsClient")
+		return errors.New("signalsclient: PositionManager has no event source")
 	}
 	events, errs := pm.client.SubscribeEvents(ctx)
 	for {
@@ -985,7 +993,8 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 	if executableAbsDelta > requestedAbsDelta {
 		executableAbsDelta = requestedAbsDelta
 	}
-	if quantity > floatTolerance && !isExposureReduction(pos.Size, pos.Size+delta) {
+	reduceOnly := isExposureReduction(pos.Size, pos.Size+delta)
+	if quantity > floatTolerance && !reduceOnly {
 		executableAbsDelta += pm.executableMarginBufferExposure(quantity, price, equity, leverage, metadata.LotSize, metadata.MinSize, executableAbsDelta)
 	}
 	executableDelta := sign(delta) * executableAbsDelta
@@ -1011,6 +1020,7 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 		LotSize:            metadata.LotSize,
 		TickSize:           metadata.TickSize,
 		Leverage:           leverage,
+		ReduceOnly:         reduceOnly,
 		Timestamp:          now,
 		Replay:             replay,
 	}

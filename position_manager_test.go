@@ -367,6 +367,9 @@ func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
 	if len(reductions) != 1 || reductions[0].Instrument != "BTC-USDT-SWAP" || reductions[0].Side != SideSell {
 		t.Fatalf("expected BTC reduction before ETH opening, got %+v", reductions)
 	}
+	if !reductions[0].ReduceOnly {
+		t.Fatalf("expected reduction order to be reduce-only, got %+v", reductions[0])
+	}
 	expectedBTCTarget := 0.10 / (1 + reductions[0].Leverage*reductions[0].FeeRate)
 	if math.Abs(reductions[0].TargetSize-expectedBTCTarget) > 1e-9 {
 		t.Fatalf("expected BTC target to leave room for fees, got %+v", reductions[0])
@@ -380,6 +383,9 @@ func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
 	}
 	if len(openings) != 1 || openings[0].Instrument != "ETH-USDT-SWAP" || openings[0].Side != SideBuy {
 		t.Fatalf("expected ETH opening after reduction phase, got %+v", openings)
+	}
+	if openings[0].ReduceOnly {
+		t.Fatalf("expected opening order not to be reduce-only, got %+v", openings[0])
 	}
 }
 

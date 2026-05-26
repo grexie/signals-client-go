@@ -14,7 +14,7 @@ import (
 
 func TestParseSignalEvent(t *testing.T) {
 	ts := time.Date(2026, 5, 26, 1, 2, 3, 0, time.UTC)
-	raw := []byte(`{"type":"signal","subscriptionId":7,"venue":"okx","instrument":"BTC-USDT-SWAP","timestamp":"` + ts.Format(time.RFC3339) + `","replay":true,"signal":{"confidence":0.72,"side":"buy","takeProfit":0.01,"stopLoss":0.004,"score":0.32}}`)
+	raw := []byte(`{"type":"signal","subscriptionId":7,"venue":"okx","instrument":"BTC-USDT-SWAP","timestamp":"` + ts.Format(time.RFC3339) + `","replay":true,"signal":{"confidence":0.72,"side":"buy","takeProfit":0.01,"stopLoss":0.004,"score":0.32,"predictionMode":"dual-directional","modelVariant":"dual-directional","modelVersion":"dual-cfg-01","confidenceMapping":"evBased","upProbability":0.61,"downProbability":0.42,"directionalEdge":0.19,"normalizedEdge":0.18,"expectedValue":0.0021,"regime":"trend","atrPercent":0.006,"generatedAt":"` + ts.Format(time.RFC3339) + `","artifactID":"okx:btc-usdt-swap:15m:dual-directional","artifactVersion":"v1"}}`)
 	ev, err := ParseEvent(raw)
 	if err != nil {
 		t.Fatal(err)
@@ -28,6 +28,12 @@ func TestParseSignalEvent(t *testing.T) {
 	}
 	if !signal.Replay || !signal.Timestamp.Equal(ts) || signal.Signal.Side != SideBuy {
 		t.Fatalf("unexpected replay/timestamp/side: %+v", signal)
+	}
+	if signal.Signal.PredictionMode != "dual-directional" || signal.Signal.ModelVersion != "dual-cfg-01" || signal.Signal.ConfidenceMapping != "evBased" {
+		t.Fatalf("dual metadata not decoded: %+v", signal.Signal)
+	}
+	if signal.Signal.UpProbability != 0.61 || signal.Signal.DownProbability != 0.42 || signal.Signal.ExpectedValue != 0.0021 {
+		t.Fatalf("dual probabilities not decoded: %+v", signal.Signal)
 	}
 }
 
