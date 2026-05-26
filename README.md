@@ -65,6 +65,7 @@ The server sends `ReadyEvent`, `SubscribedEvent`, `UnsubscribedEvent`, `InfoEven
 - same-side churn can be suppressed by `RebalanceInterval`, while opposite-side signals can still flip positions;
 - fees are applied to order recommendations and realized PnL;
 - `AvailableMarginBuffer` reserves part of available margin before sizing openings, and openings are capped or suppressed when the buffered budget cannot fund the next executable lot/min-size step including fees.
+- `ExecutableMarginBuffer` adds a small, capped margin cushion to opening/increase orders after lot flooring so downstream order normalization can still clear the intended lot when mark prices move by a tick.
 
 ```go
 manager := signalsclient.NewPositionManager(client, signalsclient.PositionManagerConfig{
@@ -77,6 +78,7 @@ manager := signalsclient.NewPositionManager(client, signalsclient.PositionManage
 	MinLeverage:       1,
 	MaxLeverage:       3,
 	AvailableMarginBuffer: 0.10,
+	ExecutableMarginBuffer: 0.001,
 	Instruments: map[string]signalsclient.InstrumentConfig{
 		"okx:BTC-USDT-SWAP": {TakerFeeRate: 0.00045, MaxLeverage: 5},
 	},

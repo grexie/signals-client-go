@@ -10,18 +10,20 @@ import (
 )
 
 const (
-	DefaultMakerFeeRate          = 0.0002
-	DefaultTakerFeeRate          = 0.0005
-	DefaultPositionSize          = 1.0
-	DefaultMinExpectedEdge       = 0.0045
-	DefaultMinOrderDelta         = 0.20
-	DefaultRebalanceInterval     = 6 * time.Hour
-	DefaultMinimumLeverage       = 1.0
-	DefaultMaximumLeverage       = 1.0
-	DefaultAvailableMarginBuffer = 0.10
-	portfolioPositionBudget      = 1.0
-	floatTolerance               = 1e-9
-	defaultPositionOrderChannel  = 128
+	DefaultMakerFeeRate            = 0.0002
+	DefaultTakerFeeRate            = 0.0005
+	DefaultPositionSize            = 1.0
+	DefaultMinExpectedEdge         = 0.0045
+	DefaultMinOrderDelta           = 0.20
+	DefaultRebalanceInterval       = 6 * time.Hour
+	DefaultMinimumLeverage         = 1.0
+	DefaultMaximumLeverage         = 1.0
+	DefaultAvailableMarginBuffer   = 0.10
+	DefaultExecutableMarginBuffer  = 0.001
+	portfolioPositionBudget        = 1.0
+	floatTolerance                 = 1e-9
+	defaultPositionOrderChannel    = 128
+	maxExecutableLotBufferFraction = 0.45
 )
 
 // InstrumentConfig overrides fees and leverage limits for one instrument.
@@ -34,34 +36,36 @@ type InstrumentConfig struct {
 
 // PositionManagerConfig controls fee-aware sizing and leverage selection.
 type PositionManagerConfig struct {
-	PositionSize          float64
-	MinExpectedEdge       float64
-	MinOrderDelta         float64
-	RebalanceInterval     time.Duration
-	MakerFeeRate          float64
-	TakerFeeRate          float64
-	MinLeverage           float64
-	MaxLeverage           float64
-	AvailableMarginBuffer float64
-	Instruments           map[string]InstrumentConfig
-	AssetManager          *AssetManager
-	InstrumentManager     *InstrumentManager
+	PositionSize           float64
+	MinExpectedEdge        float64
+	MinOrderDelta          float64
+	RebalanceInterval      time.Duration
+	MakerFeeRate           float64
+	TakerFeeRate           float64
+	MinLeverage            float64
+	MaxLeverage            float64
+	AvailableMarginBuffer  float64
+	ExecutableMarginBuffer float64
+	Instruments            map[string]InstrumentConfig
+	AssetManager           *AssetManager
+	InstrumentManager      *InstrumentManager
 }
 
 // ProductionPositionManagerConfig returns the same execution-policy defaults
 // used by the Grexie Signals server.
 func ProductionPositionManagerConfig() PositionManagerConfig {
 	return PositionManagerConfig{
-		PositionSize:          DefaultPositionSize,
-		MinExpectedEdge:       DefaultMinExpectedEdge,
-		MinOrderDelta:         DefaultMinOrderDelta,
-		RebalanceInterval:     DefaultRebalanceInterval,
-		MakerFeeRate:          DefaultMakerFeeRate,
-		TakerFeeRate:          DefaultTakerFeeRate,
-		MinLeverage:           DefaultMinimumLeverage,
-		MaxLeverage:           DefaultMaximumLeverage,
-		AvailableMarginBuffer: DefaultAvailableMarginBuffer,
-		Instruments:           map[string]InstrumentConfig{},
+		PositionSize:           DefaultPositionSize,
+		MinExpectedEdge:        DefaultMinExpectedEdge,
+		MinOrderDelta:          DefaultMinOrderDelta,
+		RebalanceInterval:      DefaultRebalanceInterval,
+		MakerFeeRate:           DefaultMakerFeeRate,
+		TakerFeeRate:           DefaultTakerFeeRate,
+		MinLeverage:            DefaultMinimumLeverage,
+		MaxLeverage:            DefaultMaximumLeverage,
+		AvailableMarginBuffer:  DefaultAvailableMarginBuffer,
+		ExecutableMarginBuffer: DefaultExecutableMarginBuffer,
+		Instruments:            map[string]InstrumentConfig{},
 	}
 }
 
@@ -900,13 +904,40 @@ func (pm *PositionManager) capOpeningDeltaToBudget(key string, pos *Position, de
 		return 0
 	}
 	if executable.margin < absDelta {
-		return sign(delta) * executable.margin
+		return pm.capExecutableDeltaWithBufferedCost(key, pos, sign(delta)*executable.margin, context, budget)
 	}
 	order := pm.orderForDeltaLocked(key, pos, delta, context.expectedEdge, context.score, "budget-check", time.Now().UTC(), context.confidence, false)
 	if orderBudgetCost(order) > budget+floatTolerance {
-		return sign(delta) * executable.margin
+		return pm.capExecutableDeltaWithBufferedCost(key, pos, sign(delta)*executable.margin, context, budget)
 	}
 	return delta
+}
+
+func (pm *PositionManager) capExecutableDeltaWithBufferedCost(key string, pos *Position, delta float64, context signalContext, budget float64) float64 {
+	if pos == nil || math.Abs(delta) <= floatTolerance || budget <= floatTolerance {
+		return 0
+	}
+	metadata := pm.instrumentMetadataForKey(key, pos.Venue, pos.Instrument)
+	price := roundToTick(positiveOr(pos.LastPrice, pos.EntryPrice), metadata.TickSize)
+	asset, _ := pm.assets.Asset(metadata.SettlementCurrency)
+	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, 1)
+	leverage := pm.selectLeverage(key, context.confidence, context.expectedEdge, context.score)
+	stepMargin := 0.0
+	if metadata.LotSize > 0 && price > 0 && equity > 0 && leverage > 0 {
+		stepMargin = metadata.LotSize * price / (equity * leverage)
+	}
+	candidate := math.Abs(delta)
+	for candidate > floatTolerance {
+		order := pm.orderForDeltaLocked(key, pos, sign(delta)*candidate, context.expectedEdge, context.score, "budget-check", time.Now().UTC(), context.confidence, false)
+		if orderBudgetCost(order) <= budget+floatTolerance {
+			return sign(delta) * candidate
+		}
+		if stepMargin <= floatTolerance {
+			return 0
+		}
+		candidate -= stepMargin
+	}
+	return 0
 }
 
 func (pm *PositionManager) shouldSkipRebalanceDelta(pos *Position, targetSize, delta float64, now time.Time, hasOverride bool) bool {
@@ -954,6 +985,9 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 	if executableAbsDelta > requestedAbsDelta {
 		executableAbsDelta = requestedAbsDelta
 	}
+	if quantity > floatTolerance && !isExposureReduction(pos.Size, pos.Size+delta) {
+		executableAbsDelta += pm.executableMarginBufferExposure(quantity, price, equity, leverage, metadata.LotSize, metadata.MinSize, executableAbsDelta)
+	}
 	executableDelta := sign(delta) * executableAbsDelta
 	return Order{
 		Venue:              pos.Venue,
@@ -980,6 +1014,25 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 		Timestamp:          now,
 		Replay:             replay,
 	}
+}
+
+func (pm *PositionManager) executableMarginBufferExposure(quantity, price, equity, leverage, lotSize, minSize, marginExposure float64) float64 {
+	if pm == nil || pm.cfg.ExecutableMarginBuffer <= 0 || quantity <= 0 || price <= 0 || equity <= 0 || leverage <= 0 || marginExposure <= 0 {
+		return 0
+	}
+	buffer := marginExposure * pm.cfg.ExecutableMarginBuffer
+	stepSize := lotSize
+	if stepSize <= 0 {
+		stepSize = minSize
+	}
+	if stepSize > 0 {
+		stepMargin := stepSize * price / (equity * leverage)
+		maxStepBuffer := stepMargin * maxExecutableLotBufferFraction
+		if maxStepBuffer > 0 && buffer > maxStepBuffer {
+			buffer = maxStepBuffer
+		}
+	}
+	return buffer
 }
 
 func orderBudgetCost(order Order) float64 {
@@ -1205,6 +1258,12 @@ func normalizePositionManagerConfig(cfg PositionManagerConfig) PositionManagerCo
 	}
 	if cfg.AvailableMarginBuffer > 0.95 {
 		cfg.AvailableMarginBuffer = 0.95
+	}
+	if cfg.ExecutableMarginBuffer < 0 {
+		cfg.ExecutableMarginBuffer = 0
+	}
+	if cfg.ExecutableMarginBuffer > 0.05 {
+		cfg.ExecutableMarginBuffer = 0.05
 	}
 	if cfg.Instruments == nil {
 		cfg.Instruments = map[string]InstrumentConfig{}

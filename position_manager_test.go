@@ -466,6 +466,51 @@ func TestPositionManagerSuppressesOpeningWhenBufferedBudgetCannotFundNextLot(t *
 	}
 }
 
+func TestPositionManagerAddsExecutableMarginBufferWithoutCrossingNextLot(t *testing.T) {
+	assets := NewAssetManager()
+	equity := 10.0
+	price := 2.045824286
+	leverage := 4.0
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: equity, Available: equity, Equity: equity})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "TRUMP-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 1, MinSize: 1, TickSize: 0,
+	})
+	oneLotMargin := price / (equity * leverage)
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:           oneLotMargin * 1.01,
+		MinExpectedEdge:        0,
+		MinOrderDelta:          0,
+		MinLeverage:            leverage,
+		MaxLeverage:            leverage,
+		ExecutableMarginBuffer: 0.001,
+		AssetManager:           assets,
+		InstrumentManager:      instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "TRUMP-USDT-SWAP", Side: SideSell, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: price,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected buffered one-lot opening, got %+v", orders)
+	}
+	if orders[0].Quantity != 1 {
+		t.Fatalf("expected exactly one executable lot, got %+v", orders[0])
+	}
+	wantDelta := -oneLotMargin * 1.001
+	if math.Abs(orders[0].SizeDelta-wantDelta) > 1e-9 {
+		t.Fatalf("expected size delta %f, got %+v", wantDelta, orders[0])
+	}
+	twoLots := oneLotMargin * 2
+	if math.Abs(orders[0].SizeDelta) >= twoLots {
+		t.Fatalf("buffer crossed into another lot: %+v", orders[0])
+	}
+}
+
 func TestPositionManagerStats(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 800, Used: 200, Equity: 1000})
