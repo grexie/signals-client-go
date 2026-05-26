@@ -38,10 +38,20 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(sellOrders) != 1 || sellOrders[0].Side != SideSell || sellOrders[0].Reason != "flip" {
-		t.Fatalf("expected flip sell order, got %+v", sellOrders)
+		t.Fatalf("expected flip close order, got %+v", sellOrders)
 	}
-	if sellOrders[0].SizeDelta >= -0.19 {
-		t.Fatalf("expected sell delta to close long and open short, got %.8f", sellOrders[0].SizeDelta)
+	if math.Abs(sellOrders[0].TargetSize) > 1e-9 || math.Abs(sellOrders[0].SizeDelta+0.10) > 1e-9 {
+		t.Fatalf("expected first flip phase to close the long only, got %+v", sellOrders[0])
+	}
+	openShort, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.9,
+		TakeProfit: 0.02, StopLoss: 0.004, Score: -0.6, Price: 99, Timestamp: now.Add(2 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openShort) != 1 || openShort[0].Side != SideSell || openShort[0].Reason != "opening" {
+		t.Fatalf("expected second flip phase to open short, got %+v", openShort)
 	}
 }
 
@@ -260,6 +270,76 @@ func TestPositionManagerRejectsOrdersBelowInstrumentMinSize(t *testing.T) {
 	}
 	if len(orders) != 0 {
 		t.Fatalf("expected below-min order to be rejected, got %+v", orders)
+	}
+}
+
+func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 1000, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "ETH-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.20,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	pm.AddPosition(Position{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Size: 0.15, Confidence: 1,
+		EntryPrice: 100, LastPrice: 100,
+	})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	reductions, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reductions) != 1 || reductions[0].Instrument != "BTC-USDT-SWAP" || reductions[0].Side != SideSell {
+		t.Fatalf("expected BTC reduction before ETH opening, got %+v", reductions)
+	}
+	if math.Abs(reductions[0].TargetSize-0.10) > 1e-9 {
+		t.Fatalf("expected BTC target 0.10, got %+v", reductions[0])
+	}
+	openings, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(openings) != 1 || openings[0].Instrument != "ETH-USDT-SWAP" || openings[0].Side != SideBuy {
+		t.Fatalf("expected ETH opening after reduction phase, got %+v", openings)
+	}
+}
+
+func TestPositionManagerCapsOpeningsToAvailableExposure(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 50, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.20,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected capped opening, got %+v", orders)
+	}
+	if math.Abs(orders[0].SizeDelta-0.05) > 1e-9 || math.Abs(orders[0].TargetSize-0.05) > 1e-9 {
+		t.Fatalf("expected opening capped to available exposure, got %+v", orders[0])
 	}
 }
 

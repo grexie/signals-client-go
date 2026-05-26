@@ -595,8 +595,15 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 	}
 
 	usedBudget := math.Min(pm.cfg.PositionSize, totalWeight)
-	orders := make([]Order, 0)
-	for key, pos := range pm.positions {
+	keys := make([]string, 0, len(pm.positions))
+	for key := range pm.positions {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	reductions := make([]rebalanceCandidate, 0)
+	openings := make([]rebalanceCandidate, 0)
+	for _, key := range keys {
+		pos := pm.positions[key]
 		if pos == nil {
 			continue
 		}
@@ -605,6 +612,9 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 			targetSize = sides[key] * usedBudget * weights[key] / totalWeight
 		}
 		delta := targetSize - pos.Size
+		if isFlipTarget(pos.Size, targetSize) {
+			delta = -pos.Size
+		}
 		if math.Abs(delta) <= floatTolerance {
 			pos.Confidence = weights[key]
 			continue
@@ -616,24 +626,93 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 		}
 		ctx := signalContexts[key]
 		reason := orderReason(pos, targetSize)
-		order := pm.orderForDeltaLocked(key, pos, delta, ctx.expectedEdge, ctx.score, reason, now, ctx.confidence, false)
-		order.TakeProfit = ctx.takeProfit
-		order.StopLoss = ctx.stopLoss
+		candidate := rebalanceCandidate{
+			key:     key,
+			pos:     pos,
+			delta:   delta,
+			weight:  weights[key],
+			context: ctx,
+			reason:  reason,
+		}
+		if isExposureReduction(pos.Size, pos.Size+delta) {
+			reductions = append(reductions, candidate)
+		} else {
+			openings = append(openings, candidate)
+		}
+	}
+	if len(reductions) > 0 {
+		return pm.materializeRebalanceOrdersLocked(reductions, now, nil)
+	}
+	return pm.materializeRebalanceOrdersLocked(openings, now, map[string]float64{})
+}
+
+type rebalanceCandidate struct {
+	key     string
+	pos     *Position
+	delta   float64
+	weight  float64
+	context signalContext
+	reason  string
+}
+
+func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalanceCandidate, now time.Time, openingExposureByCurrency map[string]float64) []Order {
+	orders := make([]Order, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.pos == nil || math.Abs(candidate.delta) <= floatTolerance {
+			continue
+		}
+		delta := candidate.delta
+		if openingExposureByCurrency != nil && !isExposureReduction(candidate.pos.Size, candidate.pos.Size+delta) {
+			metadata := pm.instrumentMetadataForKey(candidate.key, candidate.pos.Venue, candidate.pos.Instrument)
+			currency := metadata.SettlementCurrency
+			available := pm.availableExposureBudget(currency) - openingExposureByCurrency[currency]
+			if available <= floatTolerance {
+				candidate.pos.Confidence = candidate.weight
+				continue
+			}
+			if math.Abs(delta) > available {
+				delta = sign(delta) * available
+			}
+		}
+		order := pm.orderForDeltaLocked(candidate.key, candidate.pos, delta, candidate.context.expectedEdge, candidate.context.score, candidate.reason, now, candidate.context.confidence, false)
+		order.TakeProfit = candidate.context.takeProfit
+		order.StopLoss = candidate.context.stopLoss
 		if !pm.orderMeetsInstrumentMinimum(order) {
-			pos.Confidence = weights[key]
+			candidate.pos.Confidence = candidate.weight
 			continue
 		}
 		orders = append(orders, order)
-		price := pos.LastPrice
-		if price <= 0 {
-			price = pos.EntryPrice
+		if openingExposureByCurrency != nil && !isExposureReduction(order.PreviousSize, order.TargetSize) {
+			openingExposureByCurrency[order.SettlementCurrency] += math.Abs(order.SizeDelta)
 		}
-		pm.applyPositionDeltaLocked(key, pos, delta, price, pm.takerFeeRate(key), now)
-		if current := pm.positions[key]; current != nil {
-			current.Confidence = weights[key]
+		price := candidate.pos.LastPrice
+		if price <= 0 {
+			price = candidate.pos.EntryPrice
+		}
+		pm.applyPositionDeltaLocked(candidate.key, candidate.pos, delta, price, pm.takerFeeRate(candidate.key), now)
+		if current := pm.positions[candidate.key]; current != nil {
+			current.Confidence = candidate.weight
 		}
 	}
 	return orders
+}
+
+func (pm *PositionManager) availableExposureBudget(currency string) float64 {
+	asset, ok := pm.assets.Asset(currency)
+	if !ok {
+		return math.Inf(1)
+	}
+	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, asset.Cash)
+	if equity <= 0 {
+		if asset.Available > 0 {
+			return math.Inf(1)
+		}
+		return 0
+	}
+	if asset.Available <= 0 {
+		return 0
+	}
+	return math.Max(0, asset.Available/equity)
 }
 
 func (pm *PositionManager) shouldSkipRebalanceDelta(pos *Position, targetSize, delta float64, now time.Time, hasOverride bool) bool {
@@ -991,6 +1070,25 @@ func orderReason(pos *Position, targetSize float64) string {
 		return "flip"
 	}
 	return "rebalance"
+}
+
+func isFlipTarget(previousSize, targetSize float64) bool {
+	return math.Abs(previousSize) > floatTolerance &&
+		math.Abs(targetSize) > floatTolerance &&
+		!sameSign(previousSize, targetSize)
+}
+
+func isExposureReduction(previousSize, targetSize float64) bool {
+	if math.Abs(previousSize) <= floatTolerance {
+		return false
+	}
+	if math.Abs(targetSize) <= floatTolerance {
+		return true
+	}
+	if !sameSign(previousSize, targetSize) {
+		return true
+	}
+	return math.Abs(targetSize) < math.Abs(previousSize)-floatTolerance
 }
 
 func positionKey(venue, instrument string) string {

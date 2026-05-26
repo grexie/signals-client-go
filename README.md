@@ -3,7 +3,7 @@
 Typed Go client for Grexie Signals websocket subscriptions and in-memory position management.
 
 ```sh
-go get github.com/grexie/signals-client-go@v0.1.1
+go get github.com/grexie/signals-client-go@v0.1.2
 ```
 
 ## Websocket Client
@@ -59,6 +59,8 @@ The server sends `ReadyEvent`, `SubscribedEvent`, `UnsubscribedEvent`, `InfoEven
 - the configured `PositionSize` is the total portfolio budget across all open positions;
 - confidence is stored separately from size;
 - positions are rebalanced by confidence weight;
+- exposure reductions, closes, and first-phase flips are emitted before openings or increases;
+- openings and increases are capped by live `AssetManager` available exposure when asset snapshots are attached;
 - `MinOrderDelta` is scaled by `PositionSize`, so a `0.20` delta with a `0.10` budget means a `0.02` minimum order;
 - same-side churn can be suppressed by `RebalanceInterval`, while opposite-side signals can still flip positions;
 - fees are applied to order recommendations and realized PnL.
