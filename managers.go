@@ -68,8 +68,8 @@ func (m *AssetManager) Assets() []AssetSnapshot {
 	return assets
 }
 
-// InstrumentMetadata contains exchange constraints used to turn target
-// portfolio percentages into executable quantities.
+// InstrumentMetadata contains exchange constraints used to turn capital
+// allocations into executable lot quantities.
 type InstrumentMetadata struct {
 	Venue              string
 	Instrument         string

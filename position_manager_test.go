@@ -8,7 +8,7 @@ import (
 
 func TestPositionManagerOpensAndFlips(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.10,
+		MaxMarginRatio:    0.10,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0.20,
 		RebalanceInterval: time.Hour,
@@ -57,7 +57,7 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 
 func TestPositionManagerUsesConfidenceAsAllocationWeight(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:    0.10,
+		MaxMarginRatio:  0.10,
 		MinExpectedEdge: 0,
 		MinOrderDelta:   0.20,
 	})
@@ -84,7 +84,7 @@ func TestPositionManagerQuantizesOrderTargetSize(t *testing.T) {
 		LotSize: 1, MinSize: 1, TickSize: 0.1,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.50,
+		MaxMarginRatio:    0.50,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		AssetManager:      assets,
@@ -100,7 +100,7 @@ func TestPositionManagerQuantizesOrderTargetSize(t *testing.T) {
 	if len(orders) != 1 {
 		t.Fatalf("expected quantized executable order, got %+v", orders)
 	}
-	if orders[0].Quantity != 1 || math.Abs(orders[0].SizeDelta-0.333) > 1e-9 || math.Abs(orders[0].TargetSize-0.333) > 1e-9 {
+	if orders[0].Quantity != 1 || math.Abs(orders[0].SizeDelta-1) > 1e-9 || math.Abs(orders[0].TargetSize-1) > 1e-9 {
 		t.Fatalf("expected size to reflect one executable lot, got %+v", orders[0])
 	}
 }
@@ -118,14 +118,14 @@ func TestPositionManagerDropsLowConfidenceInstrumentToFundExecutableHighConfiden
 		LotSize: 1, MinSize: 1, TickSize: 0.1,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.70,
+		MaxMarginRatio:    0.70,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		AssetManager:      assets,
 		InstrumentManager: instruments,
 	})
 	pm.AddPosition(Position{
-		Venue: "okx", Instrument: "LOW-USDT-SWAP", Size: 0.333, Confidence: 0.1,
+		Venue: "okx", Instrument: "LOW-USDT-SWAP", Size: 1, Confidence: 0.1,
 		EntryPrice: 333, LastPrice: 333,
 	})
 
@@ -146,14 +146,14 @@ func TestPositionManagerDropsLowConfidenceInstrumentToFundExecutableHighConfiden
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(openings) != 1 || openings[0].Instrument != "HIGH-USDT-SWAP" || openings[0].Quantity != 2 || math.Abs(openings[0].TargetSize-0.666) > 1e-9 {
+	if len(openings) != 1 || openings[0].Instrument != "HIGH-USDT-SWAP" || openings[0].Quantity != 2 || math.Abs(openings[0].TargetSize-2) > 1e-9 {
 		t.Fatalf("expected freed budget to fund two high-confidence lots, got %+v", openings)
 	}
 }
 
 func TestPositionManagerFeeAwareEdgeGate(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:    1,
+		MaxMarginRatio:  1,
 		MinExpectedEdge: 0.0045,
 		TakerFeeRate:    0.0005,
 	})
@@ -172,7 +172,7 @@ func TestPositionManagerFeeAwareEdgeGate(t *testing.T) {
 
 func TestPositionManagerIgnoresUnconfiguredSignals(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:    0.10,
+		MaxMarginRatio:  0.10,
 		MinExpectedEdge: 0,
 		MinOrderDelta:   0,
 	})
@@ -201,7 +201,7 @@ func TestPositionManagerIgnoresUnconfiguredSignals(t *testing.T) {
 
 func TestPositionManagerIgnoresReplayEvents(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:    0.10,
+		MaxMarginRatio:  0.10,
 		MinExpectedEdge: 0,
 		MinOrderDelta:   0,
 	})
@@ -236,7 +236,7 @@ func TestPositionManagerIgnoresReplayEvents(t *testing.T) {
 func TestPositionManagerLeverageAdaptsWithinConfiguredCaps(t *testing.T) {
 	leverageFor := func(instrument string, confidence, takeProfit, score float64) float64 {
 		pm := NewPositionManager(nil, PositionManagerConfig{
-			PositionSize:    1,
+			MaxMarginRatio:  1,
 			MinExpectedEdge: 0,
 			MinOrderDelta:   0,
 			MinLeverage:     1,
@@ -279,7 +279,7 @@ func TestAssetAndInstrumentManagersProduceConcreteOrders(t *testing.T) {
 		LotSize: 0.001, MinSize: 0.002, TickSize: 0.1, MaxLeverage: 2,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.10,
+		MaxMarginRatio:    0.10,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		MinLeverage:       1,
@@ -321,7 +321,7 @@ func TestPositionManagerRejectsOrdersBelowInstrumentMinSize(t *testing.T) {
 		LotSize: 0.001, MinSize: 1, TickSize: 0.1,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.01,
+		MaxMarginRatio:    0.01,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		AssetManager:      assets,
@@ -348,7 +348,7 @@ func TestPositionManagerRejectsBelowMinimumClosingOrder(t *testing.T) {
 		LotSize: 0.001, MinSize: 1, TickSize: 0.1,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.01,
+		MaxMarginRatio:    0.01,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		AssetManager:      assets,
@@ -373,7 +373,7 @@ func TestPositionManagerUsesContractValueForLotSizing(t *testing.T) {
 		LotSize: 1, MinSize: 1, TickSize: 0.001, ContractValue: 0.1, ContractMultiplier: 1,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.0005,
+		MaxMarginRatio:    0.05,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		MinLeverage:       5,
@@ -391,9 +391,8 @@ func TestPositionManagerUsesContractValueForLotSizing(t *testing.T) {
 	if len(orders) != 1 {
 		t.Fatalf("expected one contract-value-sized order, got %+v", orders)
 	}
-	wantDelta := -0.0004 // 1 contract * (2 USDT * 0.1 ctVal) / (100 equity * 5x)
-	if orders[0].Quantity != 1 || math.Abs(orders[0].SizeDelta-wantDelta) > 1e-12 || math.Abs(orders[0].Notional-0.2) > 1e-12 {
-		t.Fatalf("expected one contract sized from ctVal, got %+v", orders[0])
+	if orders[0].Quantity != 124 || math.Abs(orders[0].SizeDelta+124) > 1e-12 || math.Abs(orders[0].Notional-24.8) > 1e-12 || math.Abs(orders[0].Margin-4.96) > 1e-12 {
+		t.Fatalf("expected contract value to produce executable lots and margin, got %+v", orders[0])
 	}
 }
 
@@ -404,14 +403,14 @@ func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
 	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
 	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "ETH-USDT-SWAP", SettlementCurrency: "USDT"})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.20,
+		MaxMarginRatio:    0.20,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		AssetManager:      assets,
 		InstrumentManager: instruments,
 	})
 	pm.AddPosition(Position{
-		Venue: "okx", Instrument: "BTC-USDT-SWAP", Size: 0.15, Confidence: 1,
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Size: 2, Confidence: 1,
 		EntryPrice: 100, LastPrice: 100,
 	})
 	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
@@ -428,7 +427,7 @@ func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
 	if !reductions[0].ReduceOnly {
 		t.Fatalf("expected reduction order to be reduce-only, got %+v", reductions[0])
 	}
-	expectedBTCTarget := 0.10 / (1 + reductions[0].Leverage*reductions[0].FeeRate)
+	expectedBTCTarget := (100.0 / (1 + reductions[0].Leverage*reductions[0].FeeRate)) / reductions[0].Price
 	if math.Abs(reductions[0].TargetSize-expectedBTCTarget) > 1e-9 {
 		t.Fatalf("expected BTC target to leave room for fees, got %+v", reductions[0])
 	}
@@ -453,7 +452,7 @@ func TestPositionManagerCapsOpeningsToAvailableExposure(t *testing.T) {
 	instruments := NewInstrumentManager()
 	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:      0.20,
+		MaxMarginRatio:    0.20,
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		AssetManager:      assets,
@@ -469,7 +468,7 @@ func TestPositionManagerCapsOpeningsToAvailableExposure(t *testing.T) {
 	if len(orders) != 1 {
 		t.Fatalf("expected capped opening, got %+v", orders)
 	}
-	if orderBudgetCost(orders[0])-0.05 > 1e-9 || orders[0].SizeDelta >= 0.05 {
+	if orderBudgetCost(orders[0])-50 > 1e-9 || orders[0].Margin >= 50 {
 		t.Fatalf("expected opening plus fees capped to available exposure, got %+v", orders[0])
 	}
 }
@@ -479,7 +478,7 @@ func TestPositionManagerCapsOpeningsToPortfolioBudgetWithoutAssetSnapshot(t *tes
 	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
 	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "ETH-USDT-SWAP", SettlementCurrency: "USDT"})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:           1,
+		MaxMarginRatio:         1,
 		MinExpectedEdge:        0,
 		MinOrderDelta:          0,
 		RebalanceInterval:      6 * time.Hour,
@@ -510,8 +509,8 @@ func TestPositionManagerCapsOpeningsToPortfolioBudgetWithoutAssetSnapshot(t *tes
 	for _, pos := range pm.Positions() {
 		total += math.Abs(pos.Size)
 	}
-	if total > 1+1e-9 {
-		t.Fatalf("expected total portfolio size to stay within 100%%, total=%.12f orders=%+v positions=%+v", total, orders, pm.Positions())
+	if total > 0.01+1e-9 {
+		t.Fatalf("expected total lots to stay within the 1 USDT portfolio budget, total=%.12f orders=%+v positions=%+v", total, orders, pm.Positions())
 	}
 }
 
@@ -521,7 +520,7 @@ func TestPositionManagerReservesAvailableMarginBuffer(t *testing.T) {
 	instruments := NewInstrumentManager()
 	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:          0.20,
+		MaxMarginRatio:        0.20,
 		MinExpectedEdge:       0,
 		MinOrderDelta:         0,
 		AvailableMarginBuffer: 0.10,
@@ -538,7 +537,7 @@ func TestPositionManagerReservesAvailableMarginBuffer(t *testing.T) {
 	if len(orders) != 1 {
 		t.Fatalf("expected buffered capped opening, got %+v", orders)
 	}
-	if orderBudgetCost(orders[0])-0.045 > 1e-9 || orders[0].SizeDelta >= 0.045 {
+	if orderBudgetCost(orders[0])-45 > 1e-9 || orders[0].Margin >= 45 {
 		t.Fatalf("expected opening plus fees capped to 90%% of available exposure, got %+v", orders[0])
 	}
 }
@@ -552,7 +551,7 @@ func TestPositionManagerSuppressesOpeningWhenBufferedBudgetCannotFundNextLot(t *
 		LotSize: 0.5, MinSize: 0.5, TickSize: 0.1,
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:          0.20,
+		MaxMarginRatio:        0.20,
 		MinExpectedEdge:       0,
 		MinOrderDelta:         0,
 		AvailableMarginBuffer: 0.10,
@@ -582,9 +581,9 @@ func TestPositionManagerAddsExecutableMarginBufferWithoutCrossingNextLot(t *test
 		Venue: "okx", Instrument: "TRUMP-USDT-SWAP", SettlementCurrency: "USDT",
 		LotSize: 1, MinSize: 1, TickSize: 0,
 	})
-	oneLotMargin := price / (equity * leverage)
+	oneLotMargin := price / leverage
 	pm := NewPositionManager(nil, PositionManagerConfig{
-		PositionSize:           oneLotMargin * 1.01,
+		MaxMarginRatio:         (oneLotMargin * 1.01) / equity,
 		MinExpectedEdge:        0,
 		MinOrderDelta:          0,
 		MinLeverage:            leverage,
@@ -606,13 +605,46 @@ func TestPositionManagerAddsExecutableMarginBufferWithoutCrossingNextLot(t *test
 	if orders[0].Quantity != 1 {
 		t.Fatalf("expected exactly one executable lot, got %+v", orders[0])
 	}
-	wantDelta := -oneLotMargin * 1.001
-	if math.Abs(orders[0].SizeDelta-wantDelta) > 1e-9 {
-		t.Fatalf("expected size delta %f, got %+v", wantDelta, orders[0])
+	if math.Abs(orders[0].SizeDelta+1) > 1e-9 {
+		t.Fatalf("expected one-lot size delta, got %+v", orders[0])
 	}
-	twoLots := oneLotMargin * 2
-	if math.Abs(orders[0].SizeDelta) >= twoLots {
+	if orders[0].Quantity >= 2 {
 		t.Fatalf("buffer crossed into another lot: %+v", orders[0])
+	}
+}
+
+func TestPositionManagerRejectsOpeningBelowMinimumPositionSizeRatio(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 1000, Available: 0.5})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "DUST-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:       0.10,
+		MinPositionSizeRatio: 0.01,
+		MinExpectedEdge:      0,
+		MinOrderDelta:        0,
+		AssetManager:         assets,
+		InstrumentManager:    instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "DUST-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 {
+		t.Fatalf("expected target below 1%% portfolio minimum to be suppressed, got %+v", orders)
+	}
+}
+
+func TestPositionManagerReplacePositionsDropsMissingVenuePositions(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{MinExpectedEdge: 0, MinOrderDelta: 0})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	pm.AddPosition(Position{Venue: "okx", Instrument: "BTC-USDT-SWAP", Size: 10, EntryPrice: 100, LastPrice: 100})
+	pm.ReplacePositions(nil)
+	if got := pm.Positions(); len(got) != 0 {
+		t.Fatalf("expected missing exchange position to be dropped, got %+v", got)
 	}
 }
 
@@ -626,7 +658,7 @@ func TestPositionManagerStats(t *testing.T) {
 	})
 	pm := NewPositionManager(nil, PositionManagerConfig{AssetManager: assets, InstrumentManager: instruments})
 	pm.AddPosition(Position{
-		Venue: "okx", Instrument: "ETH-USDT-SWAP", Size: 0.10, EntryPrice: 100, LastPrice: 110,
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Size: 10, EntryPrice: 100, LastPrice: 110,
 		Leverage: 2, RealizedPnL: 0.01, Fees: 0.001,
 	})
 	stats := pm.Stats()

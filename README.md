@@ -3,7 +3,7 @@
 Typed Go client for Grexie Signals websocket subscriptions and in-memory position management.
 
 ```sh
-go get github.com/grexie/signals-client-go@v0.1.3
+go get github.com/grexie/signals-client-go@v0.1.9
 ```
 
 ## Websocket Client
@@ -56,29 +56,31 @@ The server sends `ReadyEvent`, `SubscribedEvent`, `UnsubscribedEvent`, `InfoEven
 
 `PositionManager` consumes signal events and maintains a full in-memory position list. It uses the same portfolio model as the Grexie Signals server:
 
-- the configured `PositionSize` is the total portfolio budget across all open positions;
+- `MaxMarginRatio` is the fraction of `AssetManager` capital that may be allocated as margin across all open positions;
+- `Position.Size`, `Order.SizeDelta`, and `Order.Quantity` are executable lots/contracts, not portfolio percentages or margin values;
+- `Order.Margin` and `Order.Notional` carry the capital usage behind those lots;
 - confidence is stored separately from size;
 - positions are rebalanced by confidence weight;
 - exposure reductions, closes, and first-phase flips are emitted before openings or increases;
 - openings and increases are capped by live `AssetManager` available exposure when asset snapshots are attached;
-- `MinOrderDelta` is scaled by `PositionSize`, so a `0.20` delta with a `0.10` budget means a `0.02` minimum order;
+- `MinOrderDelta` is scaled by the max portfolio margin budget, so a `0.20` threshold with a 100 USDT margin budget means a 20 USDT minimum order;
+- `MinPositionSizeRatio` defaults to `0.01`, suppressing new positions whose margin would be less than 1% of total portfolio capital;
 - same-side churn can be suppressed by `RebalanceInterval`, while opposite-side signals can still flip positions;
 - fees are applied to order recommendations and realized PnL;
 - `AvailableMarginBuffer` reserves part of available margin before sizing openings, and openings are capped or suppressed when the buffered budget cannot fund the next executable lot/min-size step including fees.
-- `ExecutableMarginBuffer` adds a small, capped margin cushion to opening/increase orders after lot flooring so downstream order normalization can still clear the intended lot when mark prices move by a tick.
 
 ```go
 manager := signalsclient.NewPositionManager(client, signalsclient.PositionManagerConfig{
-	PositionSize:      0.10,
-	MinExpectedEdge:   0.0045,
-	MinOrderDelta:     0.20,
-	RebalanceInterval: 6 * time.Hour,
-	MakerFeeRate:      0.0002,
-	TakerFeeRate:      0.0005,
-	MinLeverage:       1,
-	MaxLeverage:       3,
+	MaxMarginRatio:       0.10,
+	MinExpectedEdge:      0.0045,
+	MinOrderDelta:        0.20,
+	MinPositionSizeRatio: 0.01,
+	RebalanceInterval:    6 * time.Hour,
+	MakerFeeRate:         0.0002,
+	TakerFeeRate:         0.0005,
+	MinLeverage:          1,
+	MaxLeverage:          3,
 	AvailableMarginBuffer: 0.10,
-	ExecutableMarginBuffer: 0.001,
 	Instruments: map[string]signalsclient.InstrumentConfig{
 		"okx:BTC-USDT-SWAP": {TakerFeeRate: 0.00045, MaxLeverage: 5},
 	},
@@ -115,13 +117,13 @@ Use `ProductionPositionManagerConfig()` when you want to start from the same exe
 
 ## Assets, Instruments, And Stats
 
-Attach `AssetManager` updates for account cash, available balance, used margin, and equity. Attach `InstrumentManager` updates for settlement currency, lot size, minimum size, tick size, and exchange max leverage. `PositionManager` uses these to emit concrete `Quantity`, `Notional`, `SettlementCurrency`, and fee-value estimates, while still preserving percentage sizing.
+Attach `AssetManager` updates for account cash, available balance, used margin, and equity. Attach `InstrumentManager` updates for settlement currency, lot size, minimum size, tick size, contract value, and exchange max leverage. `PositionManager` uses these to emit concrete `Quantity`, `SizeDelta`, `Margin`, `Notional`, `SettlementCurrency`, and fee-value estimates.
 
 Call `Stats()` for realized and unrealized PnL in account value and percent, grouped by instrument and settlement currency.
 
 ## Price Data
 
-The current Signals websocket payload exposes strategy direction, confidence, risk levels, and component diagnostics. If your feed does not include signal prices, call `UpdatePosition` or `UpdatePrice` with exchange marks before relying on realized PnL. Sizing recommendations are still emitted as portfolio percentages.
+The current Signals websocket payload exposes strategy direction, confidence, risk levels, and component diagnostics. If your feed does not include signal prices, call `UpdatePosition` or `UpdatePrice` with exchange marks before relying on realized PnL. Sizing recommendations are emitted as executable lots plus the margin/notional required by those lots.
 
 ## Development
 
