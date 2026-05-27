@@ -416,6 +416,47 @@ func TestPositionManagerCapsOpeningsToAvailableExposure(t *testing.T) {
 	}
 }
 
+func TestPositionManagerCapsOpeningsToPortfolioBudgetWithoutAssetSnapshot(t *testing.T) {
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "ETH-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:           1,
+		MinExpectedEdge:        0,
+		MinOrderDelta:          0,
+		RebalanceInterval:      6 * time.Hour,
+		MinLeverage:            1,
+		MaxLeverage:            1,
+		ExecutableMarginBuffer: 0,
+		InstrumentManager:      instruments,
+	})
+	now := time.Date(2026, 5, 27, 0, 0, 0, 0, time.UTC)
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.51,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected first opening, got %+v", orders)
+	}
+	orders, err = pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "ETH-USDT-SWAP", Side: SideBuy, Confidence: 0.51,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	total := 0.0
+	for _, pos := range pm.Positions() {
+		total += math.Abs(pos.Size)
+	}
+	if total > 1+1e-9 {
+		t.Fatalf("expected total portfolio size to stay within 100%%, total=%.12f orders=%+v positions=%+v", total, orders, pm.Positions())
+	}
+}
+
 func TestPositionManagerReservesAvailableMarginBuffer(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 50, Equity: 1000})

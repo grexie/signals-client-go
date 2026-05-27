@@ -828,14 +828,15 @@ func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalan
 }
 
 func (pm *PositionManager) availableExposureBudget(currency string) float64 {
+	portfolioBudget := pm.availablePortfolioBudgetLocked()
 	asset, ok := pm.assets.Asset(currency)
 	if !ok {
-		return math.Inf(1)
+		return portfolioBudget
 	}
 	equity := positiveOr(asset.Equity, asset.Cash+asset.Used, asset.Cash)
 	if equity <= 0 {
 		if asset.Available > 0 {
-			return math.Inf(1)
+			return portfolioBudget
 		}
 		return 0
 	}
@@ -846,7 +847,21 @@ func (pm *PositionManager) availableExposureBudget(currency string) float64 {
 	if pm.cfg.AvailableMarginBuffer > 0 {
 		budget *= 1 - pm.cfg.AvailableMarginBuffer
 	}
-	return budget
+	return math.Min(budget, portfolioBudget)
+}
+
+func (pm *PositionManager) availablePortfolioBudgetLocked() float64 {
+	if pm.cfg.PositionSize <= 0 {
+		return 0
+	}
+	used := 0.0
+	for _, pos := range pm.positions {
+		if pos == nil {
+			continue
+		}
+		used += math.Abs(pos.Size)
+	}
+	return math.Max(0, pm.cfg.PositionSize-used)
 }
 
 func (pm *PositionManager) executableAllocationForBudget(key string, pos *Position, budget float64, context signalContext) executableAllocation {
@@ -941,11 +956,35 @@ func (pm *PositionManager) capExecutableDeltaWithBufferedCost(key string, pos *P
 			return sign(delta) * candidate
 		}
 		if stepMargin <= floatTolerance {
-			return 0
+			return pm.capContinuousOpeningDeltaToBudget(key, pos, delta, context, budget)
 		}
 		candidate -= stepMargin
 	}
 	return 0
+}
+
+func (pm *PositionManager) capContinuousOpeningDeltaToBudget(key string, pos *Position, delta float64, context signalContext, budget float64) float64 {
+	if pos == nil || math.Abs(delta) <= floatTolerance || budget <= floatTolerance {
+		return 0
+	}
+	low := 0.0
+	high := math.Abs(delta)
+	for i := 0; i < 64; i++ {
+		mid := (low + high) / 2
+		if mid <= floatTolerance {
+			break
+		}
+		order := pm.orderForDeltaLocked(key, pos, sign(delta)*mid, context.expectedEdge, context.score, "budget-check", time.Now().UTC(), context.confidence, false)
+		if orderBudgetCost(order) <= budget+floatTolerance {
+			low = mid
+		} else {
+			high = mid
+		}
+	}
+	if low <= floatTolerance {
+		return 0
+	}
+	return sign(delta) * low
 }
 
 func (pm *PositionManager) shouldSkipRebalanceDelta(pos *Position, targetSize, delta float64, now time.Time, hasOverride bool) bool {
