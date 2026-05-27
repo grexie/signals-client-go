@@ -637,7 +637,8 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 			pm.positions[item.key] = pos
 		} else {
 			isFlip := sign(pos.Size) != 0 && sign(pos.Size) != item.side
-			if !isFlip && pm.cfg.RebalanceInterval > 0 && !pos.LastSignalAt.IsZero() && signal.Timestamp.Before(pos.LastSignalAt.Add(pm.cfg.RebalanceInterval)) {
+			belowMinimum := !pm.meetsMinimumPositionSize(pm.positionMarginLocked(item.key, pos))
+			if !isFlip && !belowMinimum && pm.cfg.RebalanceInterval > 0 && !pos.LastSignalAt.IsZero() && signal.Timestamp.Before(pos.LastSignalAt.Add(pm.cfg.RebalanceInterval)) {
 				continue
 			}
 		}

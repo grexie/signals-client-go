@@ -639,6 +639,7 @@ func TestPositionManagerRejectsOpeningBelowMinimumPositionSizeRatio(t *testing.T
 }
 
 func TestPositionManagerClosesPositionBelowMinimumPositionSizeRatio(t *testing.T) {
+	lastSignalAt := time.Now().UTC().Add(-time.Minute)
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 0.5, Used: 999.5, Equity: 1000})
 	instruments := NewInstrumentManager()
@@ -648,18 +649,19 @@ func TestPositionManagerClosesPositionBelowMinimumPositionSizeRatio(t *testing.T
 		MinPositionSizeRatio: 0.01,
 		MinExpectedEdge:      0,
 		MinOrderDelta:        0,
-		RebalanceInterval:    0,
+		RebalanceInterval:    6 * time.Hour,
 		AssetManager:         assets,
 		InstrumentManager:    instruments,
 	})
 	pm.AddPosition(Position{
 		Venue: "okx", Instrument: "DUST-USDT-SWAP",
 		Size: 0.005, Confidence: 0.5, EntryPrice: 100, LastPrice: 100,
+		LastSignalAt: lastSignalAt,
 	})
 
 	orders, err := pm.HandleSignal(Signal{
 		Venue: "okx", Instrument: "DUST-USDT-SWAP", Side: SideBuy, Confidence: 1,
-		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: lastSignalAt.Add(time.Minute),
 	})
 	if err != nil {
 		t.Fatal(err)
