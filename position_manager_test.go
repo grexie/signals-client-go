@@ -339,6 +339,64 @@ func TestPositionManagerRejectsOrdersBelowInstrumentMinSize(t *testing.T) {
 	}
 }
 
+func TestPositionManagerRejectsBelowMinimumClosingOrder(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 10})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 0.001, MinSize: 1, TickSize: 0.1,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.01,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	pm.AddPosition(Position{Venue: "okx", Instrument: "BTC-USDT-SWAP", Size: 0.01, EntryPrice: 100, LastPrice: 100})
+	orders, err := pm.ClosePosition("okx", "BTC-USDT-SWAP")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 {
+		t.Fatalf("expected below-min close to be suppressed, got %+v", orders)
+	}
+}
+
+func TestPositionManagerUsesContractValueForLotSizing(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 100, Available: 100})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{
+		Venue: "okx", Instrument: "TRUMP-USDT-SWAP", SettlementCurrency: "USDT",
+		LotSize: 1, MinSize: 1, TickSize: 0.001, ContractValue: 0.1, ContractMultiplier: 1,
+	})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		PositionSize:      0.0005,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		MinLeverage:       5,
+		MaxLeverage:       5,
+		AssetManager:      assets,
+		InstrumentManager: instruments,
+	})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "TRUMP-USDT-SWAP", Side: SideSell, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 2,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected one contract-value-sized order, got %+v", orders)
+	}
+	wantDelta := -0.0004 // 1 contract * (2 USDT * 0.1 ctVal) / (100 equity * 5x)
+	if orders[0].Quantity != 1 || math.Abs(orders[0].SizeDelta-wantDelta) > 1e-12 || math.Abs(orders[0].Notional-0.2) > 1e-12 {
+		t.Fatalf("expected one contract sized from ctVal, got %+v", orders[0])
+	}
+}
+
 func TestPositionManagerPhasesReductionsBeforeOpenings(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 1000, Equity: 1000})

@@ -77,6 +77,8 @@ type InstrumentMetadata struct {
 	LotSize            float64
 	MinSize            float64
 	TickSize           float64
+	ContractValue      float64
+	ContractMultiplier float64
 	MaxLeverage        float64
 }
 
