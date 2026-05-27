@@ -1200,7 +1200,8 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 	contractNotional := instrumentContractNotional(price, metadata)
 	quantity := requestedAbsDelta
 	reduceOnly := isExposureReduction(pos.Size, pos.Size+delta)
-	if contractNotional > 0 {
+	closesToZero := math.Abs(pos.Size) > floatTolerance && math.Abs(pos.Size+delta) <= floatTolerance
+	if contractNotional > 0 && !closesToZero {
 		quantity = roundDownToStep(quantity, metadata.LotSize)
 	}
 	notional := quantity * contractNotional
@@ -1431,6 +1432,9 @@ func (pm *PositionManager) instrumentMetadataForKey(key, venue, instrument strin
 func (pm *PositionManager) orderMeetsInstrumentMinimum(order Order) bool {
 	if order.Quantity <= 0 {
 		return false
+	}
+	if order.Reason == "closing" || order.Reason == "flip" {
+		return true
 	}
 	if order.MinSize > 0 && order.Quantity > 0 && order.Quantity < order.MinSize {
 		return false

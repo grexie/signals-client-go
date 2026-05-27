@@ -339,7 +339,7 @@ func TestPositionManagerRejectsOrdersBelowInstrumentMinSize(t *testing.T) {
 	}
 }
 
-func TestPositionManagerRejectsBelowMinimumClosingOrder(t *testing.T) {
+func TestPositionManagerAllowsBelowMinimumClosingOrder(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 10})
 	instruments := NewInstrumentManager()
@@ -359,8 +359,11 @@ func TestPositionManagerRejectsBelowMinimumClosingOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(orders) != 0 {
-		t.Fatalf("expected below-min close to be suppressed, got %+v", orders)
+	if len(orders) != 1 || orders[0].Reason != "closing" || math.Abs(orders[0].TargetSize) > 1e-9 {
+		t.Fatalf("expected below-min close to close exactly, got %+v", orders)
+	}
+	if math.Abs(orders[0].SizeDelta+0.01) > 1e-9 || math.Abs(orders[0].Quantity-0.01) > 1e-9 {
+		t.Fatalf("closing order rounded residual position: %+v", orders[0])
 	}
 }
 
@@ -617,7 +620,7 @@ func TestPositionManagerRejectsOpeningBelowMinimumPositionSizeRatio(t *testing.T
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 1000, Available: 0.5})
 	instruments := NewInstrumentManager()
-	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "DUST-USDT-SWAP", SettlementCurrency: "USDT"})
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "DUST-USDT-SWAP", SettlementCurrency: "USDT", LotSize: 0.1, MinSize: 0.1})
 	pm := NewPositionManager(nil, PositionManagerConfig{
 		MaxMarginRatio:       0.10,
 		MinPositionSizeRatio: 0.01,
@@ -668,6 +671,9 @@ func TestPositionManagerClosesPositionBelowMinimumPositionSizeRatio(t *testing.T
 	}
 	if len(orders) != 1 || orders[0].Side != SideSell || orders[0].Reason != "closing" || math.Abs(orders[0].TargetSize) > 1e-9 {
 		t.Fatalf("expected below-minimum position to close, got %+v", orders)
+	}
+	if math.Abs(orders[0].SizeDelta+0.005) > 1e-9 || math.Abs(orders[0].Quantity-0.005) > 1e-9 {
+		t.Fatalf("closing order rounded residual position: %+v", orders[0])
 	}
 }
 
