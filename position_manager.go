@@ -710,15 +710,20 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 			continue
 		}
 		targetSize := targets[key]
+		if math.Abs(pos.Size) > floatTolerance && !pm.meetsMinimumPositionSize(pm.positionMarginLocked(key, pos)) {
+			targetSize = 0
+		} else if targetSize != 0 && !pm.meetsMinimumPositionSize(pm.marginForQuantityLocked(key, pos, targetSize)) {
+			if math.Abs(pos.Size) <= floatTolerance {
+				pos.Confidence = weights[key]
+				continue
+			}
+			targetSize = 0
+		}
 		delta := targetSize - pos.Size
 		if isFlipTarget(pos.Size, targetSize) {
 			delta = -pos.Size
 		}
 		if math.Abs(delta) <= floatTolerance {
-			pos.Confidence = weights[key]
-			continue
-		}
-		if targetSize != 0 && !pm.meetsMinimumPositionSize(pm.marginForQuantityLocked(key, pos, targetSize)) && !isExposureReduction(pos.Size, targetSize) {
 			pos.Confidence = weights[key]
 			continue
 		}

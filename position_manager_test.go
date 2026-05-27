@@ -638,6 +638,37 @@ func TestPositionManagerRejectsOpeningBelowMinimumPositionSizeRatio(t *testing.T
 	}
 }
 
+func TestPositionManagerClosesPositionBelowMinimumPositionSizeRatio(t *testing.T) {
+	assets := NewAssetManager()
+	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 0.5, Used: 999.5, Equity: 1000})
+	instruments := NewInstrumentManager()
+	instruments.UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "DUST-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:       1,
+		MinPositionSizeRatio: 0.01,
+		MinExpectedEdge:      0,
+		MinOrderDelta:        0,
+		RebalanceInterval:    0,
+		AssetManager:         assets,
+		InstrumentManager:    instruments,
+	})
+	pm.AddPosition(Position{
+		Venue: "okx", Instrument: "DUST-USDT-SWAP",
+		Size: 0.005, Confidence: 0.5, EntryPrice: 100, LastPrice: 100,
+	})
+
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "DUST-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].Side != SideSell || orders[0].Reason != "closing" || math.Abs(orders[0].TargetSize) > 1e-9 {
+		t.Fatalf("expected below-minimum position to close, got %+v", orders)
+	}
+}
+
 func TestPositionManagerReplacePositionsDropsMissingVenuePositions(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{MinExpectedEdge: 0, MinOrderDelta: 0})
 	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
