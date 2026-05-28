@@ -2,6 +2,10 @@
 
 Typed Go client for Grexie Signals websocket subscriptions and in-memory position management.
 
+## Grexie Signals - https://signals.grexie.com
+
+Grexie Signals is a real-time crypto trading signal service that streams model-backed market signals with portfolio-aware risk, sizing, and execution context for builders, bots, and trading tools.
+
 ```sh
 go get github.com/grexie/signals-client-go@v0.1.14
 ```
