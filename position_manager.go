@@ -28,10 +28,13 @@ const (
 
 // InstrumentConfig overrides fees and leverage limits for one instrument.
 type InstrumentConfig struct {
-	MakerFeeRate float64
-	TakerFeeRate float64
-	MinLeverage  float64
-	MaxLeverage  float64
+	MakerFeeRate           float64
+	TakerFeeRate           float64
+	MinLeverage            float64
+	MaxLeverage            float64
+	TrailingStopActivation float64
+	TrailingStopDistance   float64
+	TrailingStopMinProfit  float64
 }
 
 // EventSource is the narrow event stream dependency consumed by
@@ -86,20 +89,25 @@ func ProductionPositionManagerConfig() PositionManagerConfig {
 // Position is the in-memory state tracked by PositionManager. Size is signed
 // executable quantity/lots, not margin or a portfolio percentage.
 type Position struct {
-	Venue         string
-	Instrument    string
-	Size          float64
-	Confidence    float64
-	EntryPrice    float64
-	LastPrice     float64
-	TakeProfit    float64
-	StopLoss      float64
-	Leverage      float64
-	RealizedGross float64
-	Fees          float64
-	RealizedPnL   float64
-	OpenedAt      time.Time
-	LastSignalAt  time.Time
+	Venue                  string
+	Instrument             string
+	Size                   float64
+	Confidence             float64
+	EntryPrice             float64
+	LastPrice              float64
+	TakeProfit             float64
+	StopLoss               float64
+	TrailingStopActivation float64
+	TrailingStopDistance   float64
+	TrailingStopMinProfit  float64
+	Leverage               float64
+	MFE                    float64
+	MAE                    float64
+	RealizedGross          float64
+	Fees                   float64
+	RealizedPnL            float64
+	OpenedAt               time.Time
+	LastSignalAt           time.Time
 }
 
 // Side returns the current position direction.
@@ -122,34 +130,37 @@ func (p Position) UnrealizedPnL() float64 {
 
 // Order is a target order recommendation emitted by PositionManager.
 type Order struct {
-	Venue              string
-	Instrument         string
-	Side               Side
-	Reason             string
-	SizeDelta          float64
-	PreviousSize       float64
-	TargetSize         float64
-	Price              float64
-	Confidence         float64
-	Score              float64
-	ExpectedEdge       float64
-	FeeRate            float64
-	EstimatedFee       float64
-	EstimatedFeeValue  float64
-	Margin             float64
-	Quantity           float64
-	Notional           float64
-	SettlementCurrency string
-	MinSize            float64
-	LotSize            float64
-	TickSize           float64
-	Leverage           float64
-	TakeProfit         float64
-	StopLoss           float64
-	ReduceOnly         bool
-	Timestamp          time.Time
-	Subscription       int64
-	Replay             bool
+	Venue                  string
+	Instrument             string
+	Side                   Side
+	Reason                 string
+	SizeDelta              float64
+	PreviousSize           float64
+	TargetSize             float64
+	Price                  float64
+	Confidence             float64
+	Score                  float64
+	ExpectedEdge           float64
+	FeeRate                float64
+	EstimatedFee           float64
+	EstimatedFeeValue      float64
+	Margin                 float64
+	Quantity               float64
+	Notional               float64
+	SettlementCurrency     string
+	MinSize                float64
+	LotSize                float64
+	TickSize               float64
+	Leverage               float64
+	TakeProfit             float64
+	StopLoss               float64
+	TrailingStopActivation float64
+	TrailingStopDistance   float64
+	TrailingStopMinProfit  float64
+	ReduceOnly             bool
+	Timestamp              time.Time
+	Subscription           int64
+	Replay                 bool
 }
 
 // ClosedTrade records realized PnL after a position is closed or flipped.
@@ -160,9 +171,13 @@ type ClosedTrade struct {
 	Size          float64
 	EntryPrice    float64
 	ExitPrice     float64
+	ExitMove      float64
 	RealizedGross float64
 	Fees          float64
 	RealizedPnL   float64
+	MFE           float64
+	MAE           float64
+	ExitReason    string
 	OpenedAt      time.Time
 	ClosedAt      time.Time
 }
@@ -263,6 +278,7 @@ func (pm *PositionManager) UpdateInstrumentConfig(venue, instrument string, cfg 
 	if pm == nil || venue == "" || instrument == "" {
 		return
 	}
+	cfg = normalizeInstrumentConfig(cfg)
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 	if pm.cfg.Instruments == nil {
@@ -371,7 +387,7 @@ func (pm *PositionManager) ClosePosition(venue, instrument string) ([]Order, err
 	if !pm.orderMeetsInstrumentMinimum(order) {
 		return nil, nil
 	}
-	pm.applyPositionDeltaLocked(key, pos, order.SizeDelta, price, pm.takerFeeRate(key), now)
+	pm.applyPositionDeltaWithReasonLocked(key, pos, order.SizeDelta, price, pm.takerFeeRate(key), now, "closing")
 	return []Order{order}, nil
 }
 
@@ -498,16 +514,10 @@ func (pm *PositionManager) UpdatePrice(venue, instrument string, price float64, 
 		return nil, nil
 	}
 	pos.LastPrice = price
-	if !pos.exitTriggered(price) {
+	pos.updateExcursion()
+	reason, feeRate, ok := pm.exitReasonLocked(key, pos, price)
+	if !ok {
 		return nil, nil
-	}
-	reason := "stop_loss"
-	if pos.takeProfitTriggered(price) {
-		reason = "take_profit"
-	}
-	feeRate := pm.takerFeeRate(key)
-	if reason == "take_profit" {
-		feeRate = pm.makerFeeRate(key)
 	}
 	delta := -pos.Size
 	order := pm.orderForDeltaLocked(key, pos, delta, 0, 0, reason, timestamp, 0, false)
@@ -517,7 +527,7 @@ func (pm *PositionManager) UpdatePrice(venue, instrument string, price float64, 
 	if !pm.orderMeetsInstrumentMinimum(order) {
 		return nil, nil
 	}
-	pm.applyPositionDeltaLocked(key, pos, order.SizeDelta, price, feeRate, timestamp)
+	pm.applyPositionDeltaWithReasonLocked(key, pos, order.SizeDelta, price, feeRate, timestamp, reason)
 	return []Order{order}, nil
 }
 
@@ -596,16 +606,20 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 		if pm.cfg.MinExpectedEdge > 0 && edge < pm.cfg.MinExpectedEdge {
 			continue
 		}
+		trailingActivation, trailingDistance, trailingMinProfit := pm.trailingConfigForSignal(key, signal)
 		prepared = append(prepared, preparedSignal{
 			signal: signal,
 			key:    key,
 			side:   targetSign,
 			ctx: signalContext{
-				confidence:   targetConfidence,
-				score:        signal.Score,
-				expectedEdge: edge,
-				takeProfit:   signal.TakeProfit,
-				stopLoss:     signal.StopLoss,
+				confidence:             targetConfidence,
+				score:                  signal.Score,
+				expectedEdge:           edge,
+				takeProfit:             signal.TakeProfit,
+				stopLoss:               signal.StopLoss,
+				trailingStopActivation: trailingActivation,
+				trailingStopDistance:   trailingDistance,
+				trailingStopMinProfit:  trailingMinProfit,
 			},
 		})
 	}
@@ -634,6 +648,7 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 				OpenedAt:     now,
 				LastSignalAt: signal.Timestamp,
 			}
+			pos.resetExcursion()
 			pm.positions[item.key] = pos
 		} else {
 			isFlip := sign(pos.Size) != 0 && sign(pos.Size) != item.side
@@ -657,6 +672,11 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 		} else {
 			pos.TakeProfit = blendRisk(pos.TakeProfit, signal.TakeProfit, 0.5)
 			pos.StopLoss = blendRisk(pos.StopLoss, signal.StopLoss, 0.5)
+		}
+		if item.ctx.trailingStopActivation > 0 && item.ctx.trailingStopDistance > 0 {
+			pos.TrailingStopActivation = item.ctx.trailingStopActivation
+			pos.TrailingStopDistance = item.ctx.trailingStopDistance
+			pos.TrailingStopMinProfit = item.ctx.trailingStopMinProfit
 		}
 		pos.Leverage = pm.selectLeverage(item.key, item.ctx.confidence, item.ctx.expectedEdge, item.ctx.score)
 		sideOverrides[item.key] = item.side
@@ -916,6 +936,9 @@ func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalan
 		order := pm.orderForDeltaLocked(candidate.key, candidate.pos, delta, candidate.context.expectedEdge, candidate.context.score, candidate.reason, now, candidate.context.confidence, false)
 		order.TakeProfit = candidate.context.takeProfit
 		order.StopLoss = candidate.context.stopLoss
+		order.TrailingStopActivation = candidate.context.trailingStopActivation
+		order.TrailingStopDistance = candidate.context.trailingStopDistance
+		order.TrailingStopMinProfit = candidate.context.trailingStopMinProfit
 		if !pm.orderMeetsInstrumentMinimum(order) {
 			candidate.pos.Confidence = candidate.weight
 			continue
@@ -928,9 +951,14 @@ func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalan
 		if price <= 0 {
 			price = candidate.pos.EntryPrice
 		}
-		pm.applyPositionDeltaLocked(candidate.key, candidate.pos, order.SizeDelta, price, pm.takerFeeRate(candidate.key), now)
+		pm.applyPositionDeltaWithReasonLocked(candidate.key, candidate.pos, order.SizeDelta, price, pm.takerFeeRate(candidate.key), now, candidate.reason)
 		if current := pm.positions[candidate.key]; current != nil {
 			current.Confidence = candidate.weight
+			if order.TrailingStopActivation > 0 && order.TrailingStopDistance > 0 {
+				current.TrailingStopActivation = order.TrailingStopActivation
+				current.TrailingStopDistance = order.TrailingStopDistance
+				current.TrailingStopMinProfit = math.Max(0, order.TrailingStopMinProfit)
+			}
 		}
 	}
 	return orders
@@ -1211,31 +1239,36 @@ func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta,
 	}
 	executableDelta := sign(delta) * quantity
 	return Order{
-		Venue:              pos.Venue,
-		Instrument:         pos.Instrument,
-		Side:               side,
-		Reason:             reason,
-		SizeDelta:          executableDelta,
-		PreviousSize:       pos.Size,
-		TargetSize:         pos.Size + executableDelta,
-		Price:              price,
-		Confidence:         confidence,
-		Score:              score,
-		ExpectedEdge:       edge,
-		FeeRate:            feeRate,
-		EstimatedFee:       feeValueForNotional(notional, feeRate),
-		EstimatedFeeValue:  notional * feeRate,
-		Margin:             margin,
-		Quantity:           quantity,
-		Notional:           notional,
-		SettlementCurrency: metadata.SettlementCurrency,
-		MinSize:            metadata.MinSize,
-		LotSize:            metadata.LotSize,
-		TickSize:           metadata.TickSize,
-		Leverage:           leverage,
-		ReduceOnly:         reduceOnly,
-		Timestamp:          now,
-		Replay:             replay,
+		Venue:                  pos.Venue,
+		Instrument:             pos.Instrument,
+		Side:                   side,
+		Reason:                 reason,
+		SizeDelta:              executableDelta,
+		PreviousSize:           pos.Size,
+		TargetSize:             pos.Size + executableDelta,
+		Price:                  price,
+		Confidence:             confidence,
+		Score:                  score,
+		ExpectedEdge:           edge,
+		FeeRate:                feeRate,
+		EstimatedFee:           feeValueForNotional(notional, feeRate),
+		EstimatedFeeValue:      notional * feeRate,
+		Margin:                 margin,
+		Quantity:               quantity,
+		Notional:               notional,
+		SettlementCurrency:     metadata.SettlementCurrency,
+		MinSize:                metadata.MinSize,
+		LotSize:                metadata.LotSize,
+		TickSize:               metadata.TickSize,
+		Leverage:               leverage,
+		TakeProfit:             pos.TakeProfit,
+		StopLoss:               pos.StopLoss,
+		TrailingStopActivation: pos.TrailingStopActivation,
+		TrailingStopDistance:   pos.TrailingStopDistance,
+		TrailingStopMinProfit:  pos.TrailingStopMinProfit,
+		ReduceOnly:             reduceOnly,
+		Timestamp:              now,
+		Replay:                 replay,
 	}
 }
 
@@ -1273,6 +1306,10 @@ func feeExposureForMargin(margin, leverage, feeRate float64) float64 {
 }
 
 func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, delta, price, feeRate float64, now time.Time) {
+	pm.applyPositionDeltaWithReasonLocked(key, pos, delta, price, feeRate, now, "")
+}
+
+func (pm *PositionManager) applyPositionDeltaWithReasonLocked(key string, pos *Position, delta, price, feeRate float64, now time.Time, reason string) {
 	if feeRate < 0 {
 		feeRate = 0
 	}
@@ -1297,12 +1334,14 @@ func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, d
 		pos.Fees += fee
 		pos.RealizedPnL -= fee
 		pos.Size += delta
+		pos.resetExcursion()
 		return
 	}
 
 	if price > 0 {
 		pos.LastPrice = price
 	}
+	pos.updateExcursion()
 	closing := math.Min(math.Abs(pos.Size), math.Abs(delta))
 	gross := pm.realizedGrossForQuantityLocked(key, pos, closing, price)
 	fee := pm.feeForQuantityLocked(key, pos, closing, price, feeRate)
@@ -1317,9 +1356,13 @@ func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, d
 		Size:          closing,
 		EntryPrice:    pos.EntryPrice,
 		ExitPrice:     price,
+		ExitMove:      pos.move(),
 		RealizedGross: pos.RealizedGross,
 		Fees:          pos.Fees,
 		RealizedPnL:   pos.RealizedPnL,
+		MFE:           pos.MFE,
+		MAE:           pos.MAE,
+		ExitReason:    reason,
 		OpenedAt:      pos.OpenedAt,
 		ClosedAt:      now,
 	}
@@ -1341,6 +1384,7 @@ func (pm *PositionManager) applyPositionDeltaLocked(key string, pos *Position, d
 	pos.RealizedGross = 0
 	pos.Fees = pm.feeForQuantityLocked(key, pos, remaining, price, pm.takerFeeRate(key))
 	pos.RealizedPnL = -pos.Fees
+	pos.resetExcursion()
 }
 
 func (pm *PositionManager) effectiveMinOrderDelta() float64 {
@@ -1443,11 +1487,41 @@ func (pm *PositionManager) orderMeetsInstrumentMinimum(order Order) bool {
 }
 
 type signalContext struct {
-	confidence   float64
-	score        float64
-	expectedEdge float64
-	takeProfit   float64
-	stopLoss     float64
+	confidence             float64
+	score                  float64
+	expectedEdge           float64
+	takeProfit             float64
+	stopLoss               float64
+	trailingStopActivation float64
+	trailingStopDistance   float64
+	trailingStopMinProfit  float64
+}
+
+func (pm *PositionManager) trailingConfigForSignal(key string, signal Signal) (float64, float64, float64) {
+	activation := signal.TrailingStopActivation
+	distance := signal.TrailingStopDistance
+	minProfit := signal.TrailingStopMinProfit
+	if activation <= 0 || distance <= 0 {
+		if override, ok := pm.cfg.Instruments[key]; ok {
+			activation = override.TrailingStopActivation
+			distance = override.TrailingStopDistance
+			minProfit = override.TrailingStopMinProfit
+		}
+	}
+	if activation <= 0 || distance <= 0 {
+		return 0, 0, 0
+	}
+	activation = math.Max(0, activation)
+	distance = math.Max(0, distance)
+	minProfit = math.Max(0, minProfit)
+	feeFloor := 2 * pm.takerFeeRate(key)
+	if minProfit < feeFloor {
+		minProfit = feeFloor
+	}
+	if activation < minProfit+floatTolerance {
+		activation = minProfit + math.Min(distance, feeFloor)
+	}
+	return activation, distance, minProfit
 }
 
 func normalizePositionManagerConfig(cfg PositionManagerConfig) PositionManagerConfig {
@@ -1505,6 +1579,34 @@ func normalizePositionManagerConfig(cfg PositionManagerConfig) PositionManagerCo
 	}
 	if cfg.Instruments == nil {
 		cfg.Instruments = map[string]InstrumentConfig{}
+	}
+	for key, instrument := range cfg.Instruments {
+		cfg.Instruments[key] = normalizeInstrumentConfig(instrument)
+	}
+	return cfg
+}
+
+func normalizeInstrumentConfig(cfg InstrumentConfig) InstrumentConfig {
+	if cfg.MakerFeeRate < 0 {
+		cfg.MakerFeeRate = 0
+	}
+	if cfg.TakerFeeRate < 0 {
+		cfg.TakerFeeRate = 0
+	}
+	if cfg.MinLeverage < 0 {
+		cfg.MinLeverage = 0
+	}
+	if cfg.MaxLeverage < 0 {
+		cfg.MaxLeverage = 0
+	}
+	if cfg.TrailingStopActivation < 0 {
+		cfg.TrailingStopActivation = 0
+	}
+	if cfg.TrailingStopDistance < 0 {
+		cfg.TrailingStopDistance = 0
+	}
+	if cfg.TrailingStopMinProfit < 0 {
+		cfg.TrailingStopMinProfit = 0
 	}
 	return cfg
 }
@@ -1581,6 +1683,58 @@ func (p Position) stopLossTriggered(price float64) bool {
 
 func (p Position) exitTriggered(price float64) bool {
 	return p.takeProfitTriggered(price) || p.stopLossTriggered(price)
+}
+
+func (pm *PositionManager) exitReasonLocked(key string, pos *Position, price float64) (string, float64, bool) {
+	if pos == nil || price <= 0 {
+		return "", 0, false
+	}
+	if pos.takeProfitTriggered(price) {
+		return "take_profit", pm.makerFeeRate(key), true
+	}
+	if pos.stopLossTriggered(price) {
+		return "stop_loss", pm.takerFeeRate(key), true
+	}
+	if pos.trailingStopTriggered() {
+		return "trailing_stop", pm.takerFeeRate(key), true
+	}
+	return "", 0, false
+}
+
+func (p Position) trailingStopTriggered() bool {
+	if p.TrailingStopActivation <= 0 || p.TrailingStopDistance <= 0 {
+		return false
+	}
+	if p.MFE+floatTolerance < p.TrailingStopActivation {
+		return false
+	}
+	floor := p.MFE - p.TrailingStopDistance
+	if p.TrailingStopMinProfit > floor {
+		floor = p.TrailingStopMinProfit
+	}
+	return p.move() <= floor+floatTolerance
+}
+
+func (p *Position) resetExcursion() {
+	if p == nil {
+		return
+	}
+	move := p.move()
+	p.MFE = math.Max(move, 0)
+	p.MAE = math.Min(move, 0)
+}
+
+func (p *Position) updateExcursion() {
+	if p == nil {
+		return
+	}
+	move := p.move()
+	if move > p.MFE {
+		p.MFE = move
+	}
+	if move < p.MAE {
+		p.MAE = move
+	}
 }
 
 func orderReason(pos *Position, targetSize float64) string {

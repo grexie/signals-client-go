@@ -70,20 +70,23 @@ func NormalizeSharedClientConfig(cfg SharedClientConfig) SharedClientConfig {
 
 // SharedSignalState is the latest in-memory signal for one venue/instrument.
 type SharedSignalState struct {
-	Venue               string
-	Instrument          string
-	Direction           string
-	SignedScore         float64
-	Confidence          float64
-	TargetExposure      float64
-	TakeProfit          float64
-	StopLoss            float64
-	Price               float64
-	RiskMetadata        map[string]any
-	TimeframeComponents []SignalComponent
-	UpdatedAt           time.Time
-	Replay              bool
-	Stale               bool
+	Venue                  string
+	Instrument             string
+	Direction              string
+	SignedScore            float64
+	Confidence             float64
+	TargetExposure         float64
+	TakeProfit             float64
+	StopLoss               float64
+	TrailingStopActivation float64
+	TrailingStopDistance   float64
+	TrailingStopMinProfit  float64
+	Price                  float64
+	RiskMetadata           map[string]any
+	TimeframeComponents    []SignalComponent
+	UpdatedAt              time.Time
+	Replay                 bool
+	Stale                  bool
 }
 
 // SharedInstrumentState is the latest lifecycle/ticker state for one subscription.
@@ -628,19 +631,25 @@ func (c *SharedClient) applySignal(event SignalEvent) {
 		signedScore = side * confidence
 	}
 	state := SharedSignalState{
-		Venue:          venue,
-		Instrument:     instrument,
-		Direction:      direction,
-		SignedScore:    signedScore,
-		Confidence:     confidence,
-		TargetExposure: side * confidence,
-		TakeProfit:     signal.TakeProfit,
-		StopLoss:       signal.StopLoss,
-		Price:          signal.Price,
+		Venue:                  venue,
+		Instrument:             instrument,
+		Direction:              direction,
+		SignedScore:            signedScore,
+		Confidence:             confidence,
+		TargetExposure:         side * confidence,
+		TakeProfit:             signal.TakeProfit,
+		StopLoss:               signal.StopLoss,
+		TrailingStopActivation: signal.TrailingStopActivation,
+		TrailingStopDistance:   signal.TrailingStopDistance,
+		TrailingStopMinProfit:  signal.TrailingStopMinProfit,
+		Price:                  signal.Price,
 		RiskMetadata: map[string]any{
-			"score":      signal.Score,
-			"confidence": confidence,
-			"side":       direction,
+			"score":                  signal.Score,
+			"confidence":             confidence,
+			"side":                   direction,
+			"trailingStopActivation": signal.TrailingStopActivation,
+			"trailingStopDistance":   signal.TrailingStopDistance,
+			"trailingStopMinProfit":  signal.TrailingStopMinProfit,
 		},
 		TimeframeComponents: signal.Components,
 		UpdatedAt:           ts,

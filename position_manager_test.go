@@ -75,6 +75,68 @@ func TestPositionManagerUsesConfidenceAsAllocationWeight(t *testing.T) {
 	}
 }
 
+func TestPositionManagerTrailingStopClosesAfterFavorableGiveback(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:  0.10,
+		MinExpectedEdge: 0,
+		MinOrderDelta:   0,
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.8,
+		TakeProfit: 0.50, StopLoss: 0.20, Price: 100, Timestamp: now,
+		TrailingStopActivation: 0.02, TrailingStopDistance: 0.01, TrailingStopMinProfit: 0.001,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 || orders[0].TrailingStopActivation != 0.02 || orders[0].TrailingStopDistance != 0.01 {
+		t.Fatalf("expected opening order with trailing settings, got %+v", orders)
+	}
+	if closed, err := pm.UpdatePrice("okx", "BTC-USDT-SWAP", 103, now.Add(time.Minute)); err != nil || len(closed) != 0 {
+		t.Fatalf("expected no close while trail is above floor, orders=%+v err=%v", closed, err)
+	}
+	closed, err := pm.UpdatePrice("okx", "BTC-USDT-SWAP", 101.8, now.Add(2*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closed) != 1 || closed[0].Reason != "trailing_stop" {
+		t.Fatalf("expected trailing_stop close, got %+v", closed)
+	}
+	trades := pm.ClosedTrades()
+	if len(trades) != 1 || trades[0].ExitReason != "trailing_stop" {
+		t.Fatalf("closed trades = %+v, want trailing_stop", trades)
+	}
+	if trades[0].MFE < 0.029 || trades[0].ExitMove < 0.017 || trades[0].RealizedPnL <= 0 {
+		t.Fatalf("expected profitable trailing close with tracked MFE, got %+v", trades[0])
+	}
+}
+
+func TestPositionManagerTrailingActivationIsAtLeastBreakeven(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:  0.10,
+		MinExpectedEdge: 0,
+		MinOrderDelta:   0,
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.8,
+		TakeProfit: 0.50, StopLoss: 0.20, Price: 100, Timestamp: now,
+		TrailingStopActivation: 0.0001, TrailingStopDistance: 0.0005,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 1 {
+		t.Fatalf("expected opening order, got %+v", orders)
+	}
+	if orders[0].TrailingStopMinProfit < 0.001 || orders[0].TrailingStopActivation <= orders[0].TrailingStopMinProfit {
+		t.Fatalf("expected breakeven-safe trailing settings, got %+v", orders[0])
+	}
+}
+
 func TestPositionManagerQuantizesOrderTargetSize(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Equity: 1000, Available: 1000})
