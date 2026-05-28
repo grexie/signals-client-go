@@ -129,6 +129,21 @@ Call `Stats()` for realized and unrealized PnL in account value and percent, gro
 
 The current Signals websocket payload exposes strategy direction, confidence, risk levels, and component diagnostics. If your feed does not include signal prices, call `UpdatePosition` or `UpdatePrice` with exchange marks before relying on realized PnL. Sizing recommendations are emitted as executable lots plus the margin/notional required by those lots.
 
+## signalsbot Paper Trader Example
+
+The `examples/signalsbot` directory contains a command-line paper trader that reads `.env`, subscribes to `SIGNALS_INSTRUMENTS`, consumes OKX candles, connects with `SIGNALS_WEBSOCKET_TOKEN`, and persists the position manager `InitialState`/`Persist` workflow to a local bbolt database.
+
+```sh
+cd examples/signalsbot
+cp .env.example .env
+go run . papertrader
+go run . clean
+docker compose up --build
+docker compose run --rm signalsbot clean
+```
+
+Set `SIGNALS_WEBSOCKET_URL` to override `wss://signals.grexie.com/ws`. Docker Compose stores the local database in the `signalsbot-data` volume.
+
 ## Development
 
 ```sh
