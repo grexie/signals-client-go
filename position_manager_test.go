@@ -451,6 +451,52 @@ func TestPositionManagerLeverageAdaptsWithinConfiguredCaps(t *testing.T) {
 	}
 }
 
+func TestPositionManagerUpdateConfigKeepsStateAndChangesLeverage(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:    1,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		RebalanceInterval: time.Hour,
+		MinLeverage:       5,
+		MaxLeverage:       5,
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	opening, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Score: 1, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opening) != 1 || math.Abs(opening[0].Leverage-5) > 1e-9 {
+		t.Fatalf("expected initial 5x opening, got %+v", opening)
+	}
+
+	pm.UpdateConfig(PositionManagerConfig{
+		MaxMarginRatio:    1,
+		MinExpectedEdge:   0,
+		MinOrderDelta:     0,
+		RebalanceInterval: time.Hour,
+		MinLeverage:       1,
+		MaxLeverage:       1,
+	})
+	if positions := pm.Positions(); len(positions) != 1 {
+		t.Fatalf("expected UpdateConfig to preserve position state, got %+v", positions)
+	}
+
+	closing, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Score: -1, Price: 99, Timestamp: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closing) != 1 || !closing[0].ReduceOnly || math.Abs(closing[0].Leverage-1) > 1e-9 {
+		t.Fatalf("expected hot config to produce 1x reduce-only close, got %+v", closing)
+	}
+}
+
 func TestAssetAndInstrumentManagersProduceConcreteOrders(t *testing.T) {
 	assets := NewAssetManager()
 	assets.UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 900, Used: 100, Equity: 1000})

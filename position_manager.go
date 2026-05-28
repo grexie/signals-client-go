@@ -282,6 +282,34 @@ func (pm *PositionManager) AssetManager() *AssetManager { return pm.assets }
 // InstrumentManager returns the mutable instrument manager used by PositionManager.
 func (pm *PositionManager) InstrumentManager() *InstrumentManager { return pm.instruments }
 
+// UpdateConfig replaces the manager policy without clearing live positions,
+// closed-trade history, asset snapshots, or instrument metadata. Nil managers
+// and nil instrument overrides keep the current runtime objects/overrides.
+func (pm *PositionManager) UpdateConfig(cfg PositionManagerConfig) {
+	if pm == nil {
+		return
+	}
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if cfg.AssetManager == nil {
+		cfg.AssetManager = pm.assets
+	}
+	if cfg.InstrumentManager == nil {
+		cfg.InstrumentManager = pm.instruments
+	}
+	if cfg.Instruments == nil {
+		cfg.Instruments = cloneInstrumentConfigMap(pm.cfg.Instruments)
+	}
+	if cfg.Persist == nil {
+		cfg.Persist = pm.cfg.Persist
+	}
+	cfg.InitialState = PositionManagerState{}
+	cfg = normalizePositionManagerConfig(cfg)
+	pm.cfg = cfg
+	pm.assets = cfg.AssetManager
+	pm.instruments = cfg.InstrumentManager
+}
+
 // UpdateInstrumentConfig upserts fee and leverage overrides for one
 // venue/instrument pair. This lets execution adapters keep dynamic venue
 // constraints in sync without rebuilding the manager.
@@ -1695,6 +1723,17 @@ func normalizePositionManagerConfig(cfg PositionManagerConfig) PositionManagerCo
 		cfg.Instruments[key] = normalizeInstrumentConfig(instrument)
 	}
 	return cfg
+}
+
+func cloneInstrumentConfigMap(in map[string]InstrumentConfig) map[string]InstrumentConfig {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]InstrumentConfig, len(in))
+	for key, cfg := range in {
+		out[key] = cfg
+	}
+	return out
 }
 
 func normalizeInstrumentConfig(cfg InstrumentConfig) InstrumentConfig {
