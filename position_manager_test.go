@@ -75,6 +75,73 @@ func TestPositionManagerUsesConfidenceAsAllocationWeight(t *testing.T) {
 	}
 }
 
+func TestPositionManagerManagePositionsOnlyDoesNotOpenOrIncrease(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:  0.10,
+		MinExpectedEdge: 0.01,
+		MinOrderDelta:   0,
+		MinLeverage:     1,
+		MaxLeverage:     5,
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+
+	noOpen, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.9,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now, ManagePositionsOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noOpen) != 0 || len(pm.Positions()) != 0 {
+		t.Fatalf("managePositionsOnly should not open exposure, orders=%+v positions=%+v", noOpen, pm.Positions())
+	}
+
+	opened, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.7,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now.Add(time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(opened) != 1 || opened[0].Reason != "opening" {
+		t.Fatalf("expected normal opening order, got %+v", opened)
+	}
+
+	sameSide, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now.Add(2 * time.Minute), ManagePositionsOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sameSide) != 0 {
+		t.Fatalf("managePositionsOnly should not increase same-side exposure, got %+v", sameSide)
+	}
+
+	closed, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.51,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 99, Timestamp: now.Add(3 * time.Minute), ManagePositionsOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(closed) != 1 || math.Abs(closed[0].TargetSize) > 1e-9 || closed[0].Reason != "closing" {
+		t.Fatalf("managePositionsOnly opposite signal should close only, got %+v", closed)
+	}
+
+	noShort, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.51,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 99, Timestamp: now.Add(4 * time.Minute), ManagePositionsOnly: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(noShort) != 0 || len(pm.Positions()) != 0 {
+		t.Fatalf("managePositionsOnly should not open after close, orders=%+v positions=%+v", noShort, pm.Positions())
+	}
+}
+
 func TestPositionManagerTrailingStopClosesAfterFavorableGiveback(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
 		MaxMarginRatio:  0.10,

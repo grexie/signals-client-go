@@ -638,7 +638,7 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 			continue
 		}
 		edge := feeAdjustedExpectedEdge(signal, pm.takerFeeRate(key))
-		if pm.cfg.MinExpectedEdge > 0 && edge < pm.cfg.MinExpectedEdge {
+		if pm.cfg.MinExpectedEdge > 0 && edge < pm.cfg.MinExpectedEdge && !signal.ManagePositionsOnly {
 			continue
 		}
 		trailingActivation, trailingDistance, trailingMinProfit := pm.trailingConfigForSignal(key, signal)
@@ -655,6 +655,7 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 				trailingStopActivation: trailingActivation,
 				trailingStopDistance:   trailingDistance,
 				trailingStopMinProfit:  trailingMinProfit,
+				managePositionsOnly:    signal.ManagePositionsOnly,
 			},
 		})
 	}
@@ -671,6 +672,9 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 		signal := item.signal
 		pos := pm.positions[item.key]
 		if pos == nil || math.Abs(pos.Size) <= floatTolerance {
+			if item.ctx.managePositionsOnly {
+				continue
+			}
 			if portfolioBudget < minOrderDelta || !pm.meetsMinimumPositionSize(portfolioBudget) {
 				continue
 			}
@@ -692,13 +696,26 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 			}
 		}
 
+		ctx := item.ctx
+		overrideSide := item.side
+		if ctx.managePositionsOnly {
+			currentSide := sign(pos.Size)
+			if currentSide == 0 {
+				continue
+			}
+			if currentSide != item.side {
+				overrideSide = 0
+			} else {
+				ctx.confidence = math.Min(ctx.confidence, clamp01(pos.Confidence))
+			}
+		}
 		if signal.Price > 0 {
 			pos.LastPrice = signal.Price
 			if pos.EntryPrice <= 0 {
 				pos.EntryPrice = signal.Price
 			}
 		}
-		pos.Confidence = item.ctx.confidence
+		pos.Confidence = ctx.confidence
 		pos.LastSignalAt = signal.Timestamp
 		if pos.TakeProfit <= 0 || pos.StopLoss <= 0 || pos.Side() != signal.Side {
 			pos.TakeProfit = signal.TakeProfit
@@ -712,9 +729,9 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 			pos.TrailingStopDistance = item.ctx.trailingStopDistance
 			pos.TrailingStopMinProfit = item.ctx.trailingStopMinProfit
 		}
-		pos.Leverage = pm.selectLeverage(item.key, item.ctx.confidence, item.ctx.expectedEdge, item.ctx.score)
-		sideOverrides[item.key] = item.side
-		signalContexts[item.key] = item.ctx
+		pos.Leverage = pm.selectLeverage(item.key, ctx.confidence, ctx.expectedEdge, ctx.score)
+		sideOverrides[item.key] = overrideSide
+		signalContexts[item.key] = ctx
 	}
 	if len(sideOverrides) == 0 {
 		pm.mu.Unlock()
@@ -840,6 +857,9 @@ func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[stri
 			continue
 		}
 		ctx := signalContexts[key]
+		if ctx.managePositionsOnly {
+			targetSize = managePositionsOnlyTargetSize(pos.Size, targetSize)
+		}
 		reason := orderReason(pos, targetSize)
 		candidate := rebalanceCandidate{
 			key:     key,
@@ -1005,6 +1025,10 @@ func (pm *PositionManager) materializeRebalanceOrdersLocked(candidates []rebalan
 			continue
 		}
 		delta := candidate.delta
+		if candidate.context.managePositionsOnly && !isExposureReduction(candidate.pos.Size, candidate.pos.Size+delta) {
+			candidate.pos.Confidence = candidate.weight
+			continue
+		}
 		if openingExposureByCurrency != nil && !isExposureReduction(candidate.pos.Size, candidate.pos.Size+delta) {
 			metadata := pm.instrumentMetadataForKey(candidate.key, candidate.pos.Venue, candidate.pos.Instrument)
 			currency := metadata.SettlementCurrency
@@ -1581,6 +1605,7 @@ type signalContext struct {
 	trailingStopActivation float64
 	trailingStopDistance   float64
 	trailingStopMinProfit  float64
+	managePositionsOnly    bool
 }
 
 func (pm *PositionManager) trailingConfigForSignal(key string, signal Signal) (float64, float64, float64) {
@@ -1840,6 +1865,22 @@ func isFlipTarget(previousSize, targetSize float64) bool {
 	return math.Abs(previousSize) > floatTolerance &&
 		math.Abs(targetSize) > floatTolerance &&
 		!sameSign(previousSize, targetSize)
+}
+
+func managePositionsOnlyTargetSize(previousSize, targetSize float64) float64 {
+	if math.Abs(previousSize) <= floatTolerance {
+		return 0
+	}
+	if math.Abs(targetSize) <= floatTolerance {
+		return 0
+	}
+	if !sameSign(previousSize, targetSize) {
+		return 0
+	}
+	if math.Abs(targetSize) > math.Abs(previousSize) {
+		return previousSize
+	}
+	return targetSize
 }
 
 func isExposureReduction(previousSize, targetSize float64) bool {

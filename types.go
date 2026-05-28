@@ -67,6 +67,7 @@ type Signal struct {
 	ArtifactID             string            `json:"artifactID,omitempty"`
 	ArtifactVersion        string            `json:"artifactVersion,omitempty"`
 	RejectedReason         string            `json:"rejectedReason,omitempty"`
+	ManagePositionsOnly    bool              `json:"managePositionsOnly,omitempty"`
 	Timestamp              time.Time         `json:"timestamp,omitempty"`
 	Price                  float64           `json:"price,omitempty"`
 }
