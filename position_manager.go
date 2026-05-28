@@ -65,6 +65,15 @@ type PositionManagerConfig struct {
 	Instruments            map[string]InstrumentConfig
 	AssetManager           *AssetManager
 	InstrumentManager      *InstrumentManager
+	InitialState           PositionManagerState
+	Persist                func(PositionManagerState)
+}
+
+// PositionManagerState is the durable runtime snapshot that hosts can store
+// and pass back through PositionManagerConfig.InitialState after a restart.
+type PositionManagerState struct {
+	Positions    []Position
+	ClosedTrades []ClosedTrade
 }
 
 // ProductionPositionManagerConfig returns the same execution-policy defaults
@@ -255,7 +264,7 @@ func NewPositionManager(client EventSource, cfg PositionManagerConfig) *Position
 	if instruments == nil {
 		instruments = NewInstrumentManager()
 	}
-	return &PositionManager{
+	pm := &PositionManager{
 		client:      client,
 		cfg:         cfg,
 		assets:      assets,
@@ -263,6 +272,8 @@ func NewPositionManager(client EventSource, cfg PositionManagerConfig) *Position
 		positions:   make(map[string]*Position),
 		orders:      make(chan Order, defaultPositionOrderChannel),
 	}
+	pm.hydrateState(cfg.InitialState)
+	return pm
 }
 
 // AssetManager returns the mutable asset manager used by PositionManager.
@@ -329,13 +340,15 @@ func (pm *PositionManager) Run(ctx context.Context) error {
 // AddPosition inserts a position into the in-memory runtime.
 func (pm *PositionManager) AddPosition(position Position) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	key := positionKey(position.Venue, position.Instrument)
 	copy := position
 	if copy.Leverage <= 0 {
 		copy.Leverage = pm.minLeverage(key)
 	}
 	pm.positions[key] = &copy
+	persist, state := pm.persistSnapshotLocked()
+	pm.mu.Unlock()
+	persistState(persist, state)
 }
 
 // UpdatePosition upserts a position in the in-memory runtime.
@@ -364,17 +377,19 @@ func (pm *PositionManager) ReplacePositions(positions []Position) {
 	}
 	pm.mu.Lock()
 	pm.positions = next
+	persist, state := pm.persistSnapshotLocked()
 	pm.mu.Unlock()
+	persistState(persist, state)
 }
 
 // ClosePosition closes one position at its last known price and returns the
 // resulting order recommendation.
 func (pm *PositionManager) ClosePosition(venue, instrument string) ([]Order, error) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	key := positionKey(venue, instrument)
 	pos := pm.positions[key]
 	if pos == nil || math.Abs(pos.Size) <= floatTolerance {
+		pm.mu.Unlock()
 		return nil, nil
 	}
 	now := time.Now().UTC()
@@ -385,9 +400,13 @@ func (pm *PositionManager) ClosePosition(venue, instrument string) ([]Order, err
 	}
 	order := pm.orderForDeltaLocked(key, pos, delta, 0, 0, "closing", now, 0, false)
 	if !pm.orderMeetsInstrumentMinimum(order) {
+		pm.mu.Unlock()
 		return nil, nil
 	}
 	pm.applyPositionDeltaWithReasonLocked(key, pos, order.SizeDelta, price, pm.takerFeeRate(key), now, "closing")
+	persist, state := pm.persistSnapshotLocked()
+	pm.mu.Unlock()
+	persistState(persist, state)
 	return []Order{order}, nil
 }
 
@@ -415,6 +434,13 @@ func (pm *PositionManager) ClosedTrades() []ClosedTrade {
 	trades := make([]ClosedTrade, len(pm.closedTrades))
 	copy(trades, pm.closedTrades)
 	return trades
+}
+
+// State returns a stable snapshot suitable for persistence.
+func (pm *PositionManager) State() PositionManagerState {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	return pm.stateLocked()
 }
 
 // Stats returns current realized and unrealized PnL percentages plus
@@ -507,16 +533,19 @@ func (pm *PositionManager) UpdatePrice(venue, instrument string, price float64, 
 		timestamp = time.Now().UTC()
 	}
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	key := positionKey(venue, instrument)
 	pos := pm.positions[key]
 	if pos == nil {
+		pm.mu.Unlock()
 		return nil, nil
 	}
 	pos.LastPrice = price
 	pos.updateExcursion()
 	reason, feeRate, ok := pm.exitReasonLocked(key, pos, price)
 	if !ok {
+		persist, state := pm.persistSnapshotLocked()
+		pm.mu.Unlock()
+		persistState(persist, state)
 		return nil, nil
 	}
 	delta := -pos.Size
@@ -525,9 +554,15 @@ func (pm *PositionManager) UpdatePrice(venue, instrument string, price float64, 
 	order.EstimatedFee = feeValueForNotional(order.Notional, feeRate)
 	order.EstimatedFeeValue = order.Notional * feeRate
 	if !pm.orderMeetsInstrumentMinimum(order) {
+		persist, state := pm.persistSnapshotLocked()
+		pm.mu.Unlock()
+		persistState(persist, state)
 		return nil, nil
 	}
 	pm.applyPositionDeltaWithReasonLocked(key, pos, order.SizeDelta, price, feeRate, timestamp, reason)
+	persist, state := pm.persistSnapshotLocked()
+	pm.mu.Unlock()
+	persistState(persist, state)
 	return []Order{order}, nil
 }
 
@@ -628,7 +663,6 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 	}
 
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
 	sideOverrides := make(map[string]float64, len(prepared))
 	signalContexts := make(map[string]signalContext, len(prepared))
 	portfolioBudget := pm.maxPortfolioMarginBudgetLocked()
@@ -683,9 +717,61 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 		signalContexts[item.key] = item.ctx
 	}
 	if len(sideOverrides) == 0 {
+		pm.mu.Unlock()
 		return nil, nil
 	}
-	return pm.rebalanceLocked(now, sideOverrides, signalContexts), nil
+	orders := pm.rebalanceLocked(now, sideOverrides, signalContexts)
+	persist, state := pm.persistSnapshotLocked()
+	pm.mu.Unlock()
+	persistState(persist, state)
+	return orders, nil
+}
+
+func (pm *PositionManager) hydrateState(state PositionManagerState) {
+	pm.positions = make(map[string]*Position, len(state.Positions))
+	for _, position := range state.Positions {
+		if position.Venue == "" || position.Instrument == "" || math.Abs(position.Size) <= floatTolerance {
+			continue
+		}
+		key := positionKey(position.Venue, position.Instrument)
+		copy := position
+		if copy.Leverage <= 0 {
+			copy.Leverage = pm.minLeverage(key)
+		}
+		pm.positions[key] = &copy
+	}
+	pm.closedTrades = append([]ClosedTrade(nil), state.ClosedTrades...)
+}
+
+func (pm *PositionManager) stateLocked() PositionManagerState {
+	positions := make([]Position, 0, len(pm.positions))
+	for _, pos := range pm.positions {
+		if pos != nil {
+			positions = append(positions, *pos)
+		}
+	}
+	sort.Slice(positions, func(i, j int) bool {
+		if positions[i].Venue == positions[j].Venue {
+			return positions[i].Instrument < positions[j].Instrument
+		}
+		return positions[i].Venue < positions[j].Venue
+	})
+	closed := make([]ClosedTrade, len(pm.closedTrades))
+	copy(closed, pm.closedTrades)
+	return PositionManagerState{Positions: positions, ClosedTrades: closed}
+}
+
+func (pm *PositionManager) persistSnapshotLocked() (func(PositionManagerState), PositionManagerState) {
+	if pm == nil || pm.cfg.Persist == nil {
+		return nil, PositionManagerState{}
+	}
+	return pm.cfg.Persist, pm.stateLocked()
+}
+
+func persistState(persist func(PositionManagerState), state PositionManagerState) {
+	if persist != nil {
+		persist(state)
+	}
 }
 
 func (pm *PositionManager) rebalanceLocked(now time.Time, sideOverrides map[string]float64, signalContexts map[string]signalContext) []Order {

@@ -3,7 +3,7 @@
 Typed Go client for Grexie Signals websocket subscriptions and in-memory position management.
 
 ```sh
-go get github.com/grexie/signals-client-go@v0.1.12
+go get github.com/grexie/signals-client-go@v0.1.14
 ```
 
 ## Websocket Client

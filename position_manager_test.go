@@ -113,6 +113,58 @@ func TestPositionManagerTrailingStopClosesAfterFavorableGiveback(t *testing.T) {
 	}
 }
 
+func TestPositionManagerPersistsAndHydratesTrailingState(t *testing.T) {
+	now := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
+	var snapshots []PositionManagerState
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MinExpectedEdge: 0,
+		MinOrderDelta:   0,
+		Persist: func(state PositionManagerState) {
+			snapshots = append(snapshots, state)
+		},
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP", SettlementCurrency: "USDT"})
+	pm.AssetManager().UpdateAsset(AssetSnapshot{Currency: "USDT", Cash: 1000, Available: 1000, Equity: 1000})
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.9,
+		TakeProfit: 0.50, StopLoss: 0.20, Price: 100, Timestamp: now,
+		TrailingStopActivation: 0.02, TrailingStopDistance: 0.01, TrailingStopMinProfit: 0.001,
+	})
+	if err != nil {
+		t.Fatalf("HandleSignal: %v", err)
+	}
+	if len(orders) == 0 {
+		t.Fatal("expected opening order")
+	}
+	if _, err := pm.UpdatePrice("okx", "BTC-USDT-SWAP", 104, now.Add(time.Minute)); err != nil {
+		t.Fatalf("UpdatePrice: %v", err)
+	}
+	if len(snapshots) < 2 {
+		t.Fatalf("expected persistence snapshots, got %d", len(snapshots))
+	}
+	latest := snapshots[len(snapshots)-1]
+	if len(latest.Positions) != 1 {
+		t.Fatalf("persisted positions = %d, want 1", len(latest.Positions))
+	}
+	if latest.Positions[0].TrailingStopActivation != 0.02 || latest.Positions[0].TrailingStopDistance != 0.01 {
+		t.Fatalf("trailing settings not persisted: %+v", latest.Positions[0])
+	}
+	if latest.Positions[0].MFE < 0.039 {
+		t.Fatalf("MFE was not persisted after price update: %+v", latest.Positions[0])
+	}
+
+	rehydrated := NewPositionManager(nil, PositionManagerConfig{
+		InitialState: latest,
+	})
+	positions := rehydrated.Positions()
+	if len(positions) != 1 {
+		t.Fatalf("hydrated positions = %d, want 1", len(positions))
+	}
+	if positions[0].TrailingStopActivation != latest.Positions[0].TrailingStopActivation || positions[0].MFE != latest.Positions[0].MFE {
+		t.Fatalf("hydrated state mismatch got %+v want %+v", positions[0], latest.Positions[0])
+	}
+}
+
 func TestPositionManagerTrailingActivationIsAtLeastBreakeven(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
 		MaxMarginRatio:  0.10,
