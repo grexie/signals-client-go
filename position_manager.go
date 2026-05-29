@@ -16,6 +16,8 @@ const (
 	DefaultMinExpectedEdge         = 0.0045
 	DefaultMinOrderDelta           = 0.20
 	DefaultRebalanceInterval       = 6 * time.Hour
+	DefaultFlipFlopWindow          = 30 * time.Minute
+	DefaultSignalFlipMinConfidence = 0
 	DefaultMinimumLeverage         = 1.0
 	DefaultMaximumLeverage         = 1.0
 	DefaultMinPositionSizeRatio    = 0.01
@@ -50,23 +52,25 @@ type EventSource interface {
 // Order.SizeDelta are signed executable quantities/lots; Margin carries the
 // settlement-currency margin required by those lots.
 type PositionManagerConfig struct {
-	MaxMarginRatio         float64
-	PositionSize           float64 // Deprecated: use MaxMarginRatio.
-	MinExpectedEdge        float64
-	MinOrderDelta          float64
-	MinPositionSizeRatio   float64
-	RebalanceInterval      time.Duration
-	MakerFeeRate           float64
-	TakerFeeRate           float64
-	MinLeverage            float64
-	MaxLeverage            float64
-	AvailableMarginBuffer  float64
-	ExecutableMarginBuffer float64
-	Instruments            map[string]InstrumentConfig
-	AssetManager           *AssetManager
-	InstrumentManager      *InstrumentManager
-	InitialState           PositionManagerState
-	Persist                func(PositionManagerState)
+	MaxMarginRatio          float64
+	PositionSize            float64 // Deprecated: use MaxMarginRatio.
+	MinExpectedEdge         float64
+	MinOrderDelta           float64
+	MinPositionSizeRatio    float64
+	RebalanceInterval       time.Duration
+	FlipFlopWindow          time.Duration
+	SignalFlipMinConfidence float64
+	MakerFeeRate            float64
+	TakerFeeRate            float64
+	MinLeverage             float64
+	MaxLeverage             float64
+	AvailableMarginBuffer   float64
+	ExecutableMarginBuffer  float64
+	Instruments             map[string]InstrumentConfig
+	AssetManager            *AssetManager
+	InstrumentManager       *InstrumentManager
+	InitialState            PositionManagerState
+	Persist                 func(PositionManagerState)
 }
 
 // PositionManagerState is the durable runtime snapshot that hosts can store
@@ -80,18 +84,20 @@ type PositionManagerState struct {
 // used by the Grexie Signals server.
 func ProductionPositionManagerConfig() PositionManagerConfig {
 	return PositionManagerConfig{
-		MaxMarginRatio:         DefaultMaxMarginRatio,
-		MinExpectedEdge:        DefaultMinExpectedEdge,
-		MinOrderDelta:          DefaultMinOrderDelta,
-		MinPositionSizeRatio:   DefaultMinPositionSizeRatio,
-		RebalanceInterval:      DefaultRebalanceInterval,
-		MakerFeeRate:           DefaultMakerFeeRate,
-		TakerFeeRate:           DefaultTakerFeeRate,
-		MinLeverage:            DefaultMinimumLeverage,
-		MaxLeverage:            DefaultMaximumLeverage,
-		AvailableMarginBuffer:  DefaultAvailableMarginBuffer,
-		ExecutableMarginBuffer: DefaultExecutableMarginBuffer,
-		Instruments:            map[string]InstrumentConfig{},
+		MaxMarginRatio:          DefaultMaxMarginRatio,
+		MinExpectedEdge:         DefaultMinExpectedEdge,
+		MinOrderDelta:           DefaultMinOrderDelta,
+		MinPositionSizeRatio:    DefaultMinPositionSizeRatio,
+		RebalanceInterval:       DefaultRebalanceInterval,
+		FlipFlopWindow:          DefaultFlipFlopWindow,
+		SignalFlipMinConfidence: DefaultSignalFlipMinConfidence,
+		MakerFeeRate:            DefaultMakerFeeRate,
+		TakerFeeRate:            DefaultTakerFeeRate,
+		MinLeverage:             DefaultMinimumLeverage,
+		MaxLeverage:             DefaultMaximumLeverage,
+		AvailableMarginBuffer:   DefaultAvailableMarginBuffer,
+		ExecutableMarginBuffer:  DefaultExecutableMarginBuffer,
+		Instruments:             map[string]InstrumentConfig{},
 	}
 }
 
@@ -719,6 +725,9 @@ func (pm *PositionManager) PlanSignals(signals []Signal, now time.Time) ([]Order
 		} else {
 			isFlip := sign(pos.Size) != 0 && sign(pos.Size) != item.side
 			belowMinimum := !pm.meetsMinimumPositionSize(pm.positionMarginLocked(item.key, pos))
+			if isFlip && pm.shouldSuppressFlipFlopLocked(pos, signal) {
+				continue
+			}
 			if !isFlip && !belowMinimum && pm.cfg.RebalanceInterval > 0 && !pos.LastSignalAt.IsZero() && signal.Timestamp.Before(pos.LastSignalAt.Add(pm.cfg.RebalanceInterval)) {
 				continue
 			}
@@ -1349,6 +1358,20 @@ func (pm *PositionManager) shouldSkipRebalanceDelta(key string, pos *Position, t
 	return false
 }
 
+func (pm *PositionManager) shouldSuppressFlipFlopLocked(pos *Position, signal Signal) bool {
+	if signal.ManagePositionsOnly {
+		return false
+	}
+	if pos == nil || pos.LastSignalAt.IsZero() || pm.cfg.FlipFlopWindow <= 0 {
+		return false
+	}
+	if !signal.Timestamp.Before(pos.LastSignalAt.Add(pm.cfg.FlipFlopWindow)) {
+		return false
+	}
+	threshold := pm.cfg.SignalFlipMinConfidence
+	return threshold <= 0 || signal.Confidence+1e-12 < threshold
+}
+
 func (pm *PositionManager) orderForDeltaLocked(key string, pos *Position, delta, edge, score float64, reason string, now time.Time, confidence float64, replay bool) Order {
 	feeRate := pm.takerFeeRate(key)
 	side := SideBuy
@@ -1691,6 +1714,15 @@ func normalizePositionManagerConfig(cfg PositionManagerConfig) PositionManagerCo
 	}
 	if cfg.RebalanceInterval < 0 {
 		cfg.RebalanceInterval = 0
+	}
+	if cfg.FlipFlopWindow < 0 {
+		cfg.FlipFlopWindow = 0
+	}
+	if cfg.SignalFlipMinConfidence < 0 {
+		cfg.SignalFlipMinConfidence = 0
+	}
+	if cfg.SignalFlipMinConfidence > 1 {
+		cfg.SignalFlipMinConfidence = 1
 	}
 	if cfg.MakerFeeRate <= 0 {
 		cfg.MakerFeeRate = DefaultMakerFeeRate

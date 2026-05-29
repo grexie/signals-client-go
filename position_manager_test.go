@@ -12,6 +12,7 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0.20,
 		RebalanceInterval: time.Hour,
+		FlipFlopWindow:    0,
 		MinLeverage:       1,
 		MaxLeverage:       5,
 	})
@@ -52,6 +53,88 @@ func TestPositionManagerOpensAndFlips(t *testing.T) {
 	}
 	if len(openShort) != 1 || openShort[0].Side != SideSell || openShort[0].Reason != "opening" {
 		t.Fatalf("expected second flip phase to open short, got %+v", openShort)
+	}
+}
+
+func TestPositionManagerSuppressesFlipFlopByDefault(t *testing.T) {
+	pm := NewPositionManager(nil, ProductionPositionManagerConfig())
+	pm.cfg.MaxMarginRatio = 0.10
+	pm.cfg.MinExpectedEdge = 0
+	pm.cfg.MinOrderDelta = 0
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	open, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.8,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open orders = %+v, want one opening", open)
+	}
+	strongFlip, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.99,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 99.95, Timestamp: now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strongFlip) != 0 {
+		t.Fatalf("default flip orders = %+v, want suppressed hard hysteresis", strongFlip)
+	}
+	outsideWindow, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.99,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 99.95, Timestamp: now.Add(31 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outsideWindow) != 1 || outsideWindow[0].Reason != "flip" {
+		t.Fatalf("outside-window flip orders = %+v, want flip", outsideWindow)
+	}
+}
+
+func TestPositionManagerAllowsExplicitHighConfidenceFlipThreshold(t *testing.T) {
+	pm := NewPositionManager(nil, PositionManagerConfig{
+		MaxMarginRatio:          0.10,
+		MinExpectedEdge:         0,
+		MinOrderDelta:           0,
+		RebalanceInterval:       time.Hour,
+		FlipFlopWindow:          30 * time.Minute,
+		SignalFlipMinConfidence: 0.72,
+	})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	open, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 0.8,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 100, Timestamp: now,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 1 {
+		t.Fatalf("open orders = %+v, want one opening", open)
+	}
+	weakFlip, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.70,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 99.95, Timestamp: now.Add(5 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(weakFlip) != 0 {
+		t.Fatalf("weak flip orders = %+v, want suppressed", weakFlip)
+	}
+	strongFlip, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideSell, Confidence: 0.72,
+		TakeProfit: 0.02, StopLoss: 0.004, Price: 99.95, Timestamp: now.Add(6 * time.Minute),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(strongFlip) != 1 || strongFlip[0].Reason != "flip" {
+		t.Fatalf("strong flip orders = %+v, want flip", strongFlip)
 	}
 }
 
@@ -457,6 +540,7 @@ func TestPositionManagerUpdateConfigKeepsStateAndChangesLeverage(t *testing.T) {
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		RebalanceInterval: time.Hour,
+		FlipFlopWindow:    0,
 		MinLeverage:       5,
 		MaxLeverage:       5,
 	})
@@ -478,6 +562,7 @@ func TestPositionManagerUpdateConfigKeepsStateAndChangesLeverage(t *testing.T) {
 		MinExpectedEdge:   0,
 		MinOrderDelta:     0,
 		RebalanceInterval: time.Hour,
+		FlipFlopWindow:    0,
 		MinLeverage:       1,
 		MaxLeverage:       1,
 	})
