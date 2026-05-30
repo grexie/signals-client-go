@@ -95,6 +95,29 @@ func TestPositionManagerSuppressesFlipFlopByDefault(t *testing.T) {
 	}
 }
 
+func TestPositionManagerIgnoresSignalsAfterInstrumentRemoved(t *testing.T) {
+	pm := NewPositionManager(nil, ProductionPositionManagerConfig())
+	pm.AssetManager().UpdateAsset(AssetSnapshot{Currency: "USDT", Available: 1000, Equity: 1000})
+	pm.InstrumentManager().UpdateInstrument(InstrumentMetadata{Venue: "okx", Instrument: "BTC-USDT-SWAP"})
+	pm.UpdateInstrumentConfig("okx", "BTC-USDT-SWAP", InstrumentConfig{TakerFeeRate: 0.001, MinLeverage: 2, MaxLeverage: 2})
+	pm.InstrumentManager().RemoveInstrument("okx", "BTC-USDT-SWAP")
+	pm.RemoveInstrumentConfig("okx", "BTC-USDT-SWAP")
+
+	orders, err := pm.HandleSignal(Signal{
+		Venue: "okx", Instrument: "BTC-USDT-SWAP", Side: SideBuy, Confidence: 1,
+		TakeProfit: 0.03, StopLoss: 0.01, Score: 1, Price: 100, Timestamp: time.Date(2026, 5, 30, 12, 0, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(orders) != 0 {
+		t.Fatalf("removed instrument should ignore signals, got %+v", orders)
+	}
+	if _, ok := pm.InstrumentManager().Instrument("okx", "BTC-USDT-SWAP"); ok {
+		t.Fatalf("expected instrument metadata to be removed")
+	}
+}
+
 func TestPositionManagerAllowsExplicitHighConfidenceFlipThreshold(t *testing.T) {
 	pm := NewPositionManager(nil, PositionManagerConfig{
 		MaxMarginRatio:          0.10,

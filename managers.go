@@ -104,6 +104,17 @@ func (m *InstrumentManager) UpdateInstrument(metadata InstrumentMetadata) {
 	m.mu.Unlock()
 }
 
+// RemoveInstrument removes one instrument metadata snapshot. PositionManager
+// ignores later signals for the venue/instrument once the metadata is removed.
+func (m *InstrumentManager) RemoveInstrument(venue, instrument string) {
+	if m == nil || venue == "" || instrument == "" {
+		return
+	}
+	m.mu.Lock()
+	delete(m.instruments, positionKey(venue, instrument))
+	m.mu.Unlock()
+}
+
 // Instrument returns metadata for one venue/instrument pair.
 func (m *InstrumentManager) Instrument(venue, instrument string) (InstrumentMetadata, bool) {
 	if m == nil {
