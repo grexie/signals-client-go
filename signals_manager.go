@@ -115,12 +115,16 @@ type SignalsManager struct {
 	intents        chan Intent
 	protections    chan UpdateTPSLEvent
 	withdrawals    chan WithdrawEvent
+	backtests      chan BacktestEvent
+	messages       chan InfoEvent
 	events         chan Event
 	errors         chan error
 
 	intentSubscribers     map[chan Intent]struct{}
 	protectionSubscribers map[chan UpdateTPSLEvent]struct{}
 	withdrawalSubscribers map[chan WithdrawEvent]struct{}
+	backtestSubscribers   map[chan BacktestEvent]struct{}
+	messageSubscribers    map[chan InfoEvent]struct{}
 	eventSubscribers      map[chan Event]struct{}
 	errorSubscribers      map[chan error]struct{}
 }
@@ -140,12 +144,16 @@ func NewSignalsManager(client SignalsClient, state SignalsManagerState, cfg Sign
 		intents:     make(chan Intent, buffer),
 		protections: make(chan UpdateTPSLEvent, buffer),
 		withdrawals: make(chan WithdrawEvent, buffer),
+		backtests:   make(chan BacktestEvent, buffer),
+		messages:    make(chan InfoEvent, buffer),
 		events:      make(chan Event, buffer),
 		errors:      make(chan error, buffer),
 
 		intentSubscribers:     make(map[chan Intent]struct{}),
 		protectionSubscribers: make(map[chan UpdateTPSLEvent]struct{}),
 		withdrawalSubscribers: make(map[chan WithdrawEvent]struct{}),
+		backtestSubscribers:   make(map[chan BacktestEvent]struct{}),
+		messageSubscribers:    make(map[chan InfoEvent]struct{}),
 		eventSubscribers:      make(map[chan Event]struct{}),
 		errorSubscribers:      make(map[chan error]struct{}),
 	}
@@ -261,6 +269,14 @@ func (m *SignalsManager) ProtectionUpdates() <-chan UpdateTPSLEvent { return m.p
 // SubscribeWithdrawals for fan-out listeners.
 func (m *SignalsManager) Withdrawals() <-chan WithdrawEvent { return m.withdrawals }
 
+// Backtests returns the legacy single-consumer backtest stream. Prefer
+// SubscribeBacktests for fan-out listeners.
+func (m *SignalsManager) Backtests() <-chan BacktestEvent { return m.backtests }
+
+// Messages returns the legacy single-consumer info-message stream. Prefer
+// SubscribeMessages for fan-out listeners.
+func (m *SignalsManager) Messages() <-chan InfoEvent { return m.messages }
+
 // Events returns the legacy single-consumer manager event stream. Prefer
 // SubscribeManagerEvents for fan-out listeners.
 func (m *SignalsManager) Events() <-chan Event { return m.events }
@@ -293,6 +309,24 @@ func (m *SignalsManager) SubscribeWithdrawals(ctx context.Context) <-chan Withdr
 	m.withdrawalSubscribers[ch] = struct{}{}
 	m.mu.Unlock()
 	go m.removeWithdrawalSubscriber(ctx, ch)
+	return ch
+}
+
+func (m *SignalsManager) SubscribeBacktests(ctx context.Context) <-chan BacktestEvent {
+	ch := make(chan BacktestEvent, m.subscriberBuffer())
+	m.mu.Lock()
+	m.backtestSubscribers[ch] = struct{}{}
+	m.mu.Unlock()
+	go m.removeBacktestSubscriber(ctx, ch)
+	return ch
+}
+
+func (m *SignalsManager) SubscribeMessages(ctx context.Context) <-chan InfoEvent {
+	ch := make(chan InfoEvent, m.subscriberBuffer())
+	m.mu.Lock()
+	m.messageSubscribers[ch] = struct{}{}
+	m.mu.Unlock()
+	go m.removeMessageSubscriber(ctx, ch)
 	return ch
 }
 
@@ -543,6 +577,10 @@ func (m *SignalsManager) handleEvent(ctx context.Context, event Event) {
 		m.sendProtectionUpdate(ev)
 	case WithdrawEvent:
 		m.sendWithdrawal(ev)
+	case BacktestEvent:
+		m.sendBacktest(ev)
+	case InfoEvent:
+		m.sendMessage(ev)
 	}
 	m.sendEvent(event)
 }
@@ -564,6 +602,8 @@ func (m *SignalsManager) acceptsEvent(event Event) bool {
 		return subscribeEventMatchesConfig(cfg, ev)
 	case InfoEvent:
 		return instrumentInConfig(cfg, ev.Venue, ev.Instrument)
+	case BacktestEvent:
+		return ev.Venue == "" || NormalizeVenue(ev.Venue) == NormalizeVenue(cfg.Venue)
 	case SignalEvent:
 		return instrumentInConfig(cfg, ev.Venue, ev.Instrument)
 	case CreateMarketOrderEvent:
@@ -584,6 +624,8 @@ func eventSubscriptionID(event Event) int64 {
 	case UnsubscribedEvent:
 		return ev.SubscriptionID
 	case InfoEvent:
+		return ev.SubscriptionID
+	case BacktestEvent:
 		return ev.SubscriptionID
 	case SignalEvent:
 		return ev.SubscriptionID
@@ -714,6 +756,44 @@ func (m *SignalsManager) sendWithdrawal(event WithdrawEvent) {
 	}
 }
 
+func (m *SignalsManager) sendBacktest(event BacktestEvent) {
+	select {
+	case m.backtests <- event:
+	default:
+	}
+	m.mu.RLock()
+	subscribers := make([]chan BacktestEvent, 0, len(m.backtestSubscribers))
+	for ch := range m.backtestSubscribers {
+		subscribers = append(subscribers, ch)
+	}
+	m.mu.RUnlock()
+	for _, ch := range subscribers {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+}
+
+func (m *SignalsManager) sendMessage(event InfoEvent) {
+	select {
+	case m.messages <- event:
+	default:
+	}
+	m.mu.RLock()
+	subscribers := make([]chan InfoEvent, 0, len(m.messageSubscribers))
+	for ch := range m.messageSubscribers {
+		subscribers = append(subscribers, ch)
+	}
+	m.mu.RUnlock()
+	for _, ch := range subscribers {
+		select {
+		case ch <- event:
+		default:
+		}
+	}
+}
+
 func (m *SignalsManager) sendEvent(event Event) {
 	select {
 	case m.events <- event:
@@ -787,6 +867,26 @@ func (m *SignalsManager) removeWithdrawalSubscriber(ctx context.Context, ch chan
 	m.mu.Lock()
 	if _, ok := m.withdrawalSubscribers[ch]; ok {
 		delete(m.withdrawalSubscribers, ch)
+		close(ch)
+	}
+	m.mu.Unlock()
+}
+
+func (m *SignalsManager) removeBacktestSubscriber(ctx context.Context, ch chan BacktestEvent) {
+	<-ctx.Done()
+	m.mu.Lock()
+	if _, ok := m.backtestSubscribers[ch]; ok {
+		delete(m.backtestSubscribers, ch)
+		close(ch)
+	}
+	m.mu.Unlock()
+}
+
+func (m *SignalsManager) removeMessageSubscriber(ctx context.Context, ch chan InfoEvent) {
+	<-ctx.Done()
+	m.mu.Lock()
+	if _, ok := m.messageSubscribers[ch]; ok {
+		delete(m.messageSubscribers, ch)
 		close(ch)
 	}
 	m.mu.Unlock()

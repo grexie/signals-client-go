@@ -172,6 +172,109 @@ type InfoEvent struct {
 
 func (InfoEvent) EventType() string { return "info" }
 
+// BacktestInstrumentResult is an instrument-level result from a scheduled
+// basket/router backtest.
+type BacktestInstrumentResult struct {
+	Instrument                       string        `json:"instrument"`
+	Signals                          int           `json:"signals"`
+	BuySignals                       int           `json:"buySignals"`
+	SellSignals                      int           `json:"sellSignals"`
+	Trades                           int           `json:"trades"`
+	Orders                           int           `json:"orders"`
+	Wins                             int           `json:"wins"`
+	Losses                           int           `json:"losses"`
+	Realized                         float64       `json:"realized"`
+	Unrealized                       float64       `json:"unrealized"`
+	Fees                             float64       `json:"fees"`
+	TotalWithUnrealized              float64       `json:"totalWithUnrealized"`
+	MaxDrawdown                      float64       `json:"maxDrawdown"`
+	AverageDailyRealized             float64       `json:"averageDailyRealized"`
+	GeometricAverageDaily            float64       `json:"geometricAverageDaily"`
+	Days                             int           `json:"days"`
+	PositiveDays                     int           `json:"positiveDays"`
+	NegativeDays                     int           `json:"negativeDays"`
+	BreakevenDays                    int           `json:"breakevenDays"`
+	ProfitableDayRate                float64       `json:"profitableDayRate"`
+	TradingDays                      int           `json:"tradingDays"`
+	TradingDayRate                   float64       `json:"tradingDayRate"`
+	AverageTradingDayRealized        float64       `json:"averageTradingDayRealized"`
+	AverageWinningTradingDayRealized float64       `json:"averageWinningTradingDayRealized"`
+	AverageLosingTradingDayRealized  float64       `json:"averageLosingTradingDayRealized"`
+	ProfitFactor                     float64       `json:"profitFactor"`
+	AverageHold                      time.Duration `json:"averageHold"`
+	AverageTimeBetweenPositions      time.Duration `json:"averageTimeBetweenPositions"`
+	TotalTimeInPosition              time.Duration `json:"totalTimeInPosition"`
+	AverageDailyTimeInPosition       time.Duration `json:"averageDailyTimeInPosition"`
+	TimeInPositionRate               float64       `json:"timeInPositionRate"`
+}
+
+// BacktestStats summarizes one scheduled basket/router backtest.
+type BacktestStats struct {
+	Signals                     int                        `json:"signals"`
+	BuySignals                  int                        `json:"buySignals"`
+	SellSignals                 int                        `json:"sellSignals"`
+	Orders                      int                        `json:"orders"`
+	Trades                      int                        `json:"trades"`
+	Wins                        int                        `json:"wins"`
+	Losses                      int                        `json:"losses"`
+	WinRate                     float64                    `json:"winRate"`
+	Realized                    float64                    `json:"realized"`
+	Unrealized                  float64                    `json:"unrealized"`
+	Fees                        float64                    `json:"fees"`
+	TotalWithUnrealized         float64                    `json:"totalWithUnrealized"`
+	MaxDrawdown                 float64                    `json:"maxDrawdown"`
+	ProfitFactor                float64                    `json:"profitFactor"`
+	AverageDailyRealized        float64                    `json:"averageDailyRealized"`
+	GeometricAverageDaily       float64                    `json:"geometricAverageDaily"`
+	AverageTimeBetweenPositions time.Duration              `json:"averageTimeBetweenPositions"`
+	TotalTimeInPosition         time.Duration              `json:"totalTimeInPosition"`
+	AverageDailyTimeInPosition  time.Duration              `json:"averageDailyTimeInPosition"`
+	TimeInPositionRate          float64                    `json:"timeInPositionRate"`
+	Days                        int                        `json:"days"`
+	PositiveDays                int                        `json:"positiveDays"`
+	NegativeDays                int                        `json:"negativeDays"`
+	BreakevenDays               int                        `json:"breakevenDays"`
+	ProfitableDayRate           float64                    `json:"profitableDayRate"`
+	GoalDays                    int                        `json:"goalDays"`
+	GoalDayRate                 float64                    `json:"goalDayRate"`
+	Instruments                 []BacktestInstrumentResult `json:"instruments"`
+}
+
+// BacktestReport is a compact scheduled backtest payload emitted for a
+// SignalsManager basket subscription.
+type BacktestReport struct {
+	ID                        string        `json:"id"`
+	Kind                      string        `json:"kind,omitempty"`
+	Venue                     string        `json:"venue"`
+	Instrument                string        `json:"instrument"`
+	BasketID                  string        `json:"basketId,omitempty"`
+	Instruments               []string      `json:"instruments,omitempty"`
+	ModelVariant              string        `json:"modelVariant,omitempty"`
+	ModelConfig               string        `json:"modelConfig,omitempty"`
+	Timeframes                []string      `json:"timeframes,omitempty"`
+	GeneratedAt               time.Time     `json:"generatedAt"`
+	From                      time.Time     `json:"from"`
+	To                        time.Time     `json:"to"`
+	Accepted                  bool          `json:"accepted"`
+	Reason                    string        `json:"reason,omitempty"`
+	Candidate                 BacktestStats `json:"candidate"`
+	DeltaRealized             float64       `json:"deltaRealized"`
+	DeltaTotalWithUnrealized  float64       `json:"deltaTotalWithUnrealized"`
+	DeltaAverageDailyRealized float64       `json:"deltaAverageDailyRealized"`
+}
+
+// BacktestEvent carries an hourly scheduled basket/router backtest for one
+// SignalsManager subscription.
+type BacktestEvent struct {
+	SubscriptionID int64          `json:"subscriptionId"`
+	Venue          string         `json:"venue,omitempty"`
+	Instrument     string         `json:"instrument,omitempty"`
+	Backtest       BacktestReport `json:"backtest"`
+	Timestamp      time.Time      `json:"timestamp,omitempty"`
+}
+
+func (BacktestEvent) EventType() string { return "backtest" }
+
 // SignalEvent carries a trading signal for a subscribed venue/instrument pair.
 type SignalEvent struct {
 	SubscriptionID int64      `json:"subscriptionId"`
@@ -205,6 +308,7 @@ type serverMessage struct {
 	Replay          bool            `json:"replay,omitempty"`
 	ReplayedAt      *time.Time      `json:"replayedAt,omitempty"`
 	Signal          json.RawMessage `json:"signal,omitempty"`
+	Backtest        json.RawMessage `json:"backtest,omitempty"`
 	IntentID        string          `json:"intentId,omitempty"`
 	Action          string          `json:"action,omitempty"`
 	Reason          string          `json:"reason,omitempty"`
@@ -302,6 +406,33 @@ func ParseEvent(data []byte) (Event, error) {
 			Timestamp:      ts,
 			Replay:         msg.Replay,
 			ReplayedAt:     msg.ReplayedAt,
+		}, nil
+	case "backtest":
+		ts := time.Time{}
+		if msg.Timestamp != nil {
+			ts = *msg.Timestamp
+		}
+		var report BacktestReport
+		if len(msg.Backtest) > 0 {
+			if err := json.Unmarshal(msg.Backtest, &report); err != nil {
+				return nil, err
+			}
+		}
+		if report.Venue == "" {
+			report.Venue = msg.Venue
+		}
+		if report.Instrument == "" {
+			report.Instrument = msg.Instrument
+		}
+		if ts.IsZero() {
+			ts = report.GeneratedAt
+		}
+		return BacktestEvent{
+			SubscriptionID: msg.SubscriptionID,
+			Venue:          msg.Venue,
+			Instrument:     msg.Instrument,
+			Backtest:       report,
+			Timestamp:      ts,
 		}, nil
 	case "signal":
 		var signal Signal

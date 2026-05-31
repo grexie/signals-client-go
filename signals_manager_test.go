@@ -55,6 +55,8 @@ func TestSignalsManagerFanoutSubscriptionsCloseWithContext(t *testing.T) {
 	second := manager.SubscribeIntents(ctx)
 	events := manager.SubscribeManagerEvents(ctx)
 	withdrawals := manager.SubscribeWithdrawals(ctx)
+	backtests := manager.SubscribeBacktests(ctx)
+	messages := manager.SubscribeMessages(ctx)
 
 	manager.handleEvent(context.Background(), CreateMarketOrderEvent{
 		SubscriptionID: 5,
@@ -70,6 +72,18 @@ func TestSignalsManagerFanoutSubscriptionsCloseWithContext(t *testing.T) {
 		Venue:          "okx",
 		Currency:       "USDT",
 		Amount:         42,
+	})
+	manager.handleEvent(context.Background(), BacktestEvent{
+		SubscriptionID: 5,
+		Venue:          "okx",
+		Backtest:       BacktestReport{ID: "bt_1", Venue: "okx", Candidate: BacktestStats{Trades: 3}},
+	})
+	manager.handleEvent(context.Background(), InfoEvent{
+		SubscriptionID: 5,
+		Venue:          "okx",
+		Instrument:     "BTC-USDT-SWAP",
+		Stage:          "backtest",
+		Message:        "scheduled backtest queued",
 	})
 
 	for name, ch := range map[string]<-chan Intent{"first": first, "second": second} {
@@ -97,6 +111,22 @@ func TestSignalsManagerFanoutSubscriptionsCloseWithContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("withdrawal subscriber did not receive fan-out")
+	}
+	select {
+	case backtest := <-backtests:
+		if backtest.Backtest.ID != "bt_1" || backtest.Backtest.Candidate.Trades != 3 {
+			t.Fatalf("unexpected backtest fan-out: %+v", backtest)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backtest subscriber did not receive fan-out")
+	}
+	select {
+	case message := <-messages:
+		if message.Stage != "backtest" || message.Message == "" {
+			t.Fatalf("unexpected message fan-out: %+v", message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("message subscriber did not receive fan-out")
 	}
 
 	cancel()

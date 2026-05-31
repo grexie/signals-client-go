@@ -103,6 +103,18 @@ func TestParseOrderRouterEvents(t *testing.T) {
 	if withdraw.SubscriptionID != 12 || withdraw.IntentID != "withdraw_1" || withdraw.Currency != "USDT" || withdraw.Amount != 42 {
 		t.Fatalf("unexpected withdraw event: %+v", withdraw)
 	}
+
+	backtestEvent, err := ParseEvent([]byte(`{"type":"backtest","subscriptionId":12,"venue":"okx","instrument":"BASKET:default","backtest":{"id":"bt_1","kind":"scheduled-basket","venue":"okx","instrument":"BASKET:default","generatedAt":"2026-05-31T12:00:00Z","from":"2026-05-24T12:00:00Z","to":"2026-05-31T12:00:00Z","accepted":true,"candidate":{"trades":3,"totalWithUnrealized":0.02,"averageDailyRealized":0.003,"maxDrawdown":0.01,"positiveDays":4,"negativeDays":2,"breakevenDays":1,"instruments":[{"instrument":"BTC-USDT-SWAP","trades":2,"realized":0.01}]}}}`))
+	if err != nil {
+		t.Fatalf("parse backtest: %v", err)
+	}
+	backtest, ok := backtestEvent.(BacktestEvent)
+	if !ok {
+		t.Fatalf("expected BacktestEvent, got %T", backtestEvent)
+	}
+	if backtest.SubscriptionID != 12 || backtest.Backtest.Candidate.Trades != 3 || len(backtest.Backtest.Candidate.Instruments) != 1 {
+		t.Fatalf("unexpected backtest event: %+v", backtest)
+	}
 }
 
 func TestSignalsClientSubscribe(t *testing.T) {
