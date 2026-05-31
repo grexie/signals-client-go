@@ -9,12 +9,14 @@ import (
 
 // AssetSnapshot is the current account state for a settlement currency.
 type AssetSnapshot struct {
-	Currency  string
-	Cash      float64
-	Available float64
-	Used      float64
-	Equity    float64
-	UpdatedAt time.Time
+	Venue     string    `json:"venue,omitempty"`
+	Currency  string    `json:"currency"`
+	Cash      float64   `json:"cash"`
+	Available float64   `json:"available"`
+	Used      float64   `json:"used"`
+	Equity    float64   `json:"equity"`
+	MaxUsage  float64   `json:"maxUsage,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
 }
 
 // AssetManager tracks cash, available balance, used margin, and equity as an

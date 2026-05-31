@@ -106,12 +106,15 @@ func ProductionPositionManagerConfig() PositionManagerConfig {
 type Position struct {
 	Venue                  string
 	Instrument             string
+	Status                 string
 	Size                   float64
 	Confidence             float64
 	EntryPrice             float64
 	LastPrice              float64
 	TakeProfit             float64
 	StopLoss               float64
+	TakeProfitPrice        float64
+	StopLossPrice          float64
 	TrailingStopActivation float64
 	TrailingStopDistance   float64
 	TrailingStopMinProfit  float64
@@ -169,6 +172,8 @@ type Order struct {
 	Leverage               float64
 	TakeProfit             float64
 	StopLoss               float64
+	TakeProfitPrice        float64
+	StopLossPrice          float64
 	TrailingStopActivation float64
 	TrailingStopDistance   float64
 	TrailingStopMinProfit  float64
@@ -1836,6 +1841,9 @@ func (p Position) confidenceFromSize(positionSize float64) float64 {
 }
 
 func (p Position) takeProfitPrice() float64 {
+	if p.TakeProfitPrice > 0 {
+		return p.TakeProfitPrice
+	}
 	if p.EntryPrice <= 0 || p.TakeProfit <= 0 {
 		return 0
 	}
@@ -1846,6 +1854,9 @@ func (p Position) takeProfitPrice() float64 {
 }
 
 func (p Position) stopLossPrice() float64 {
+	if p.StopLossPrice > 0 {
+		return p.StopLossPrice
+	}
 	if p.EntryPrice <= 0 || p.StopLoss <= 0 {
 		return 0
 	}

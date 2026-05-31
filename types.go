@@ -104,6 +104,59 @@ type UnsubscribedEvent struct {
 
 func (UnsubscribedEvent) EventType() string { return "unsubscribed" }
 
+// CreateMarketOrderEvent asks the client-side venue executor to submit a
+// market order. Execution still lives with the client/user, not the Signals
+// server.
+type CreateMarketOrderEvent struct {
+	SubscriptionID  int64     `json:"subscriptionId"`
+	IntentID        string    `json:"intentId,omitempty"`
+	Action          string    `json:"action,omitempty"`
+	Venue           string    `json:"venue,omitempty"`
+	Instrument      string    `json:"instrument"`
+	Side            Side      `json:"side"`
+	OrderType       string    `json:"orderType,omitempty"`
+	ContractSize    float64   `json:"contractSize,omitempty"`
+	Leverage        float64   `json:"leverage,omitempty"`
+	ReduceOnly      bool      `json:"reduceOnly,omitempty"`
+	TakeProfitPrice float64   `json:"takeProfitPrice,omitempty"`
+	StopLossPrice   float64   `json:"stopLossPrice,omitempty"`
+	TakeProfit      float64   `json:"takeProfit,omitempty"`
+	StopLoss        float64   `json:"stopLoss,omitempty"`
+	Timestamp       time.Time `json:"timestamp,omitempty"`
+}
+
+func (CreateMarketOrderEvent) EventType() string { return "create-market-order" }
+
+// UpdateTPSLEvent asks the client-side venue executor to update take-profit
+// and/or stop-loss for an existing venue/instrument/side position.
+type UpdateTPSLEvent struct {
+	SubscriptionID  int64     `json:"subscriptionId"`
+	IntentID        string    `json:"intentId,omitempty"`
+	Venue           string    `json:"venue,omitempty"`
+	Instrument      string    `json:"instrument"`
+	Side            Side      `json:"side"`
+	TakeProfitPrice float64   `json:"takeProfitPrice,omitempty"`
+	StopLossPrice   float64   `json:"stopLossPrice,omitempty"`
+	TakeProfit      float64   `json:"takeProfit,omitempty"`
+	StopLoss        float64   `json:"stopLoss,omitempty"`
+	Timestamp       time.Time `json:"timestamp,omitempty"`
+}
+
+func (UpdateTPSLEvent) EventType() string { return "update-tpsl" }
+
+// WithdrawEvent asks the client to withdraw a currency amount after the router
+// has made room for scheduled or profit-sharing withdrawals.
+type WithdrawEvent struct {
+	SubscriptionID int64     `json:"subscriptionId"`
+	IntentID       string    `json:"intentId,omitempty"`
+	Venue          string    `json:"venue,omitempty"`
+	Currency       string    `json:"currency"`
+	Amount         float64   `json:"amount"`
+	Timestamp      time.Time `json:"timestamp,omitempty"`
+}
+
+func (WithdrawEvent) EventType() string { return "withdraw" }
+
 // InfoEvent is a user-friendly lifecycle update for an instrument.
 type InfoEvent struct {
 	SubscriptionID int64      `json:"subscriptionId"`
@@ -140,17 +193,30 @@ type ErrorEvent struct {
 func (ErrorEvent) EventType() string { return "error" }
 
 type serverMessage struct {
-	Type           string          `json:"type"`
-	SubscriptionID int64           `json:"subscriptionId,omitempty"`
-	Venue          string          `json:"venue,omitempty"`
-	Instrument     string          `json:"instrument,omitempty"`
-	Code           string          `json:"code,omitempty"`
-	Message        string          `json:"message,omitempty"`
-	Stage          string          `json:"stage,omitempty"`
-	Timestamp      *time.Time      `json:"timestamp,omitempty"`
-	Replay         bool            `json:"replay,omitempty"`
-	ReplayedAt     *time.Time      `json:"replayedAt,omitempty"`
-	Signal         json.RawMessage `json:"signal,omitempty"`
+	Type            string          `json:"type"`
+	SubscriptionID  int64           `json:"subscriptionId,omitempty"`
+	Venue           string          `json:"venue,omitempty"`
+	Instrument      string          `json:"instrument,omitempty"`
+	Code            string          `json:"code,omitempty"`
+	Message         string          `json:"message,omitempty"`
+	Stage           string          `json:"stage,omitempty"`
+	Timestamp       *time.Time      `json:"timestamp,omitempty"`
+	Replay          bool            `json:"replay,omitempty"`
+	ReplayedAt      *time.Time      `json:"replayedAt,omitempty"`
+	Signal          json.RawMessage `json:"signal,omitempty"`
+	IntentID        string          `json:"intentId,omitempty"`
+	Action          string          `json:"action,omitempty"`
+	Side            Side            `json:"side,omitempty"`
+	OrderType       string          `json:"orderType,omitempty"`
+	ContractSize    float64         `json:"contractSize,omitempty"`
+	Leverage        float64         `json:"leverage,omitempty"`
+	ReduceOnly      bool            `json:"reduceOnly,omitempty"`
+	TakeProfitPrice float64         `json:"takeProfitPrice,omitempty"`
+	StopLossPrice   float64         `json:"stopLossPrice,omitempty"`
+	TakeProfit      float64         `json:"takeProfit,omitempty"`
+	StopLoss        float64         `json:"stopLoss,omitempty"`
+	Currency        string          `json:"currency,omitempty"`
+	Amount          float64         `json:"amount,omitempty"`
 }
 
 // ParseEvent decodes one raw websocket JSON message into the corresponding
@@ -167,6 +233,58 @@ func ParseEvent(data []byte) (Event, error) {
 		return SubscribedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, Instrument: msg.Instrument}, nil
 	case "unsubscribed":
 		return UnsubscribedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, Instrument: msg.Instrument, Code: msg.Code, Message: msg.Message}, nil
+	case "create-market-order":
+		ts := time.Time{}
+		if msg.Timestamp != nil {
+			ts = *msg.Timestamp
+		}
+		return CreateMarketOrderEvent{
+			SubscriptionID:  msg.SubscriptionID,
+			IntentID:        msg.IntentID,
+			Action:          msg.Action,
+			Venue:           msg.Venue,
+			Instrument:      msg.Instrument,
+			Side:            msg.Side,
+			OrderType:       msg.OrderType,
+			ContractSize:    msg.ContractSize,
+			Leverage:        msg.Leverage,
+			ReduceOnly:      msg.ReduceOnly,
+			TakeProfitPrice: msg.TakeProfitPrice,
+			StopLossPrice:   msg.StopLossPrice,
+			TakeProfit:      msg.TakeProfit,
+			StopLoss:        msg.StopLoss,
+			Timestamp:       ts,
+		}, nil
+	case "update-tpsl":
+		ts := time.Time{}
+		if msg.Timestamp != nil {
+			ts = *msg.Timestamp
+		}
+		return UpdateTPSLEvent{
+			SubscriptionID:  msg.SubscriptionID,
+			IntentID:        msg.IntentID,
+			Venue:           msg.Venue,
+			Instrument:      msg.Instrument,
+			Side:            msg.Side,
+			TakeProfitPrice: msg.TakeProfitPrice,
+			StopLossPrice:   msg.StopLossPrice,
+			TakeProfit:      msg.TakeProfit,
+			StopLoss:        msg.StopLoss,
+			Timestamp:       ts,
+		}, nil
+	case "withdraw":
+		ts := time.Time{}
+		if msg.Timestamp != nil {
+			ts = *msg.Timestamp
+		}
+		return WithdrawEvent{
+			SubscriptionID: msg.SubscriptionID,
+			IntentID:       msg.IntentID,
+			Venue:          msg.Venue,
+			Currency:       msg.Currency,
+			Amount:         msg.Amount,
+			Timestamp:      ts,
+		}, nil
 	case "info":
 		ts := time.Time{}
 		if msg.Timestamp != nil {

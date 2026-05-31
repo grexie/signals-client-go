@@ -67,6 +67,44 @@ func TestParseInfoAndErrorEvents(t *testing.T) {
 	}
 }
 
+func TestParseOrderRouterEvents(t *testing.T) {
+	orderEvent, err := ParseEvent([]byte(`{"type":"create-market-order","subscriptionId":12,"intentId":"intent_1","venue":"okx","instrument":"BTC-USDT-SWAP","side":"buy","orderType":"market","contractSize":3,"leverage":2}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	order, ok := orderEvent.(CreateMarketOrderEvent)
+	if !ok {
+		t.Fatalf("expected CreateMarketOrderEvent, got %T", orderEvent)
+	}
+	if order.SubscriptionID != 12 || order.IntentID != "intent_1" || order.Side != SideBuy || order.ContractSize != 3 || order.Leverage != 2 {
+		t.Fatalf("unexpected order event: %+v", order)
+	}
+
+	tpslEvent, err := ParseEvent([]byte(`{"type":"update-tpsl","subscriptionId":12,"intentId":"intent_2","venue":"okx","instrument":"BTC-USDT-SWAP","side":"buy","takeProfitPrice":72100,"stopLossPrice":70050,"takeProfit":0.03,"stopLoss":0.0007}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tpsl, ok := tpslEvent.(UpdateTPSLEvent)
+	if !ok {
+		t.Fatalf("expected UpdateTPSLEvent, got %T", tpslEvent)
+	}
+	if tpsl.SubscriptionID != 12 || tpsl.IntentID != "intent_2" || tpsl.TakeProfitPrice != 72100 || tpsl.StopLossPrice != 70050 || tpsl.TakeProfit != 0.03 || tpsl.StopLoss != 0.0007 {
+		t.Fatalf("unexpected update-tpsl event: %+v", tpsl)
+	}
+
+	withdrawEvent, err := ParseEvent([]byte(`{"type":"withdraw","subscriptionId":12,"intentId":"withdraw_1","venue":"okx","currency":"USDT","amount":42}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withdraw, ok := withdrawEvent.(WithdrawEvent)
+	if !ok {
+		t.Fatalf("expected WithdrawEvent, got %T", withdrawEvent)
+	}
+	if withdraw.SubscriptionID != 12 || withdraw.IntentID != "withdraw_1" || withdraw.Currency != "USDT" || withdraw.Amount != 42 {
+		t.Fatalf("unexpected withdraw event: %+v", withdraw)
+	}
+}
+
 func TestSignalsClientSubscribe(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	requests := make(chan map[string]any, 1)
@@ -89,7 +127,7 @@ func TestSignalsClientSubscribe(t *testing.T) {
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	client := NewSignalsClient("ws_test", WithURL(wsURL))
+	client := NewWebSocketSignalsClient("ws_test", WithURL(wsURL))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Connect(ctx); err != nil {
@@ -99,13 +137,14 @@ func TestSignalsClientSubscribe(t *testing.T) {
 	if ev, err := client.Receive(ctx); err != nil || ev.EventType() != "ready" {
 		t.Fatalf("expected ready event, got %#v err=%v", ev, err)
 	}
-	if err := client.Subscribe(ctx, "okx", "BTC-USDT-SWAP"); err != nil {
+	if _, err := client.Subscribe(ctx, SubscribeRequest{Venue: "okx", Instruments: []string{"BTC-USDT-SWAP"}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case msg := <-requests:
 		encoded, _ := json.Marshal(msg)
-		if msg["type"] != "subscribe" || msg["venue"] != "okx" || msg["instrument"] != "BTC-USDT-SWAP" {
+		instruments, _ := msg["instruments"].([]any)
+		if msg["type"] != "subscribe" || msg["venue"] != "okx" || len(instruments) != 1 || instruments[0] != "BTC-USDT-SWAP" {
 			t.Fatalf("unexpected subscribe request: %s", encoded)
 		}
 	case <-ctx.Done():
@@ -126,7 +165,7 @@ func TestSignalsClientFansOutEvents(t *testing.T) {
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	client := NewSignalsClient("ws_test", WithURL(wsURL))
+	client := NewWebSocketSignalsClient("ws_test", WithURL(wsURL))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	first, _ := client.SubscribeEvents(ctx)
@@ -165,7 +204,7 @@ func TestSignalsClientUnsubscribe(t *testing.T) {
 	defer server.Close()
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	client := NewSignalsClient("ws_test", WithURL(wsURL))
+	client := NewWebSocketSignalsClient("ws_test", WithURL(wsURL))
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := client.Connect(ctx); err != nil {

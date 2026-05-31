@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"sync"
@@ -76,8 +77,26 @@ func WithBufferSize(size int) ClientOption {
 	}
 }
 
-// SignalsClient manages an authenticated Grexie Signals websocket connection.
-type SignalsClient struct {
+// SignalsClient is the basket-router transport used by SignalsManager. The
+// production websocket implementation reconnects and replays active basket
+// subscriptions, while tests and the Signals server can provide an in-process
+// implementation.
+type SignalsClient interface {
+	Subscribe(ctx context.Context, request SubscribeRequest) (int64, error)
+	UpdateAsset(ctx context.Context, subscriptionID int64, asset AssetSnapshot) error
+	UpdatePosition(ctx context.Context, subscriptionID int64, position Position) error
+	AddInstrument(ctx context.Context, subscriptionID int64, instrument string) error
+	RemoveInstrument(ctx context.Context, subscriptionID int64, instrument string) error
+	UpdateConfig(ctx context.Context, subscriptionID int64, cfg RuntimeConfig) error
+	ScheduleWithdrawal(ctx context.Context, subscriptionID int64, withdrawal WithdrawalRequest) error
+	Unsubscribe(ctx context.Context, subscriptionID int64) error
+	SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error)
+}
+
+// WebSocketSignalsClient manages one authenticated Grexie Signals websocket
+// connection. It is a low-level transport; use NewSignalsClient for a
+// reconnecting multi-subscription client.
+type WebSocketSignalsClient struct {
 	token SignalsWebSocketToken
 	cfg   clientConfig
 
@@ -97,8 +116,9 @@ type eventSubscription struct {
 	errors chan error
 }
 
-// NewSignalsClient creates a client. Call Connect before subscribing.
-func NewSignalsClient(token SignalsWebSocketToken, opts ...ClientOption) *SignalsClient {
+// NewWebSocketSignalsClient creates a single websocket client. Call Connect
+// before sending requests.
+func NewWebSocketSignalsClient(token SignalsWebSocketToken, opts ...ClientOption) *WebSocketSignalsClient {
 	cfg := clientConfig{
 		url:        defaultWebSocketURL,
 		header:     make(http.Header),
@@ -108,7 +128,7 @@ func NewSignalsClient(token SignalsWebSocketToken, opts ...ClientOption) *Signal
 	for _, opt := range opts {
 		opt(&cfg)
 	}
-	return &SignalsClient{
+	return &WebSocketSignalsClient{
 		token:         token,
 		cfg:           cfg,
 		done:          make(chan struct{}),
@@ -118,8 +138,13 @@ func NewSignalsClient(token SignalsWebSocketToken, opts ...ClientOption) *Signal
 	}
 }
 
+// NewSignalsClient creates a reconnecting basket-router client.
+func NewSignalsClient(token SignalsWebSocketToken, opts ...ClientOption) *ReconnectingSignalsClient {
+	return NewReconnectingSignalsClient(token, opts...)
+}
+
 // Connect opens the websocket and starts the reader loop.
-func (c *SignalsClient) Connect(ctx context.Context) error {
+func (c *WebSocketSignalsClient) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn != nil {
@@ -140,7 +165,7 @@ func (c *SignalsClient) Connect(ctx context.Context) error {
 }
 
 // Close closes the websocket connection.
-func (c *SignalsClient) Close() error {
+func (c *WebSocketSignalsClient) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.conn == nil {
@@ -157,19 +182,19 @@ func (c *SignalsClient) Close() error {
 }
 
 // Events returns the stream of typed websocket events.
-func (c *SignalsClient) Events() <-chan Event {
+func (c *WebSocketSignalsClient) Events() <-chan Event {
 	return c.events
 }
 
 // Errors returns asynchronous read and protocol errors.
-func (c *SignalsClient) Errors() <-chan error {
+func (c *WebSocketSignalsClient) Errors() <-chan error {
 	return c.errors
 }
 
 // SubscribeEvents returns an independent fan-out stream of events for one
 // consumer. Use this when several components, such as multiple PositionManager
 // instances, share one SignalsClient.
-func (c *SignalsClient) SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error) {
+func (c *WebSocketSignalsClient) SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error) {
 	sub := &eventSubscription{
 		events: make(chan Event, c.cfg.bufferSize),
 		errors: make(chan error, c.cfg.bufferSize),
@@ -184,7 +209,7 @@ func (c *SignalsClient) SubscribeEvents(ctx context.Context) (<-chan Event, <-ch
 	return sub.events, sub.errors
 }
 
-func (c *SignalsClient) removeSubscription(sub *eventSubscription) {
+func (c *WebSocketSignalsClient) removeSubscription(sub *eventSubscription) {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	if _, ok := c.subscriptions[sub]; !ok {
@@ -196,7 +221,7 @@ func (c *SignalsClient) removeSubscription(sub *eventSubscription) {
 }
 
 // Receive waits for the next event or error.
-func (c *SignalsClient) Receive(ctx context.Context) (Event, error) {
+func (c *WebSocketSignalsClient) Receive(ctx context.Context) (Event, error) {
 	select {
 	case ev, ok := <-c.events:
 		if !ok {
@@ -213,34 +238,107 @@ func (c *SignalsClient) Receive(ctx context.Context) (Event, error) {
 	}
 }
 
-// Subscribe requests signal and lifecycle events for a venue/instrument pair.
-// The server answers with a SubscribedEvent carrying the subscription id.
-func (c *SignalsClient) Subscribe(ctx context.Context, venue, instrument string) error {
-	return c.writeJSON(ctx, map[string]string{
+// Subscribe requests one Bollinger-router basket subscription. The server
+// answers with a SubscribedEvent carrying the subscription id.
+func (c *WebSocketSignalsClient) Subscribe(ctx context.Context, request SubscribeRequest) (int64, error) {
+	request.Type = "subscribe"
+	return 0, c.writeJSON(ctx, request.normalized())
+}
+
+// SubscribeInstrument requests the legacy single-instrument signal stream.
+// Deprecated: new integrations should use SignalsManager and basket
+// subscriptions.
+func (c *WebSocketSignalsClient) SubscribeInstrument(ctx context.Context, venue, instrument string) error {
+	return c.writeJSON(ctx, map[string]any{
 		"type":       "subscribe",
 		"venue":      venue,
 		"instrument": instrument,
 	})
 }
 
+// UpdateAsset publishes the current account state for one settlement currency.
+func (c *WebSocketSignalsClient) UpdateAsset(ctx context.Context, subscriptionID int64, asset AssetSnapshot) error {
+	return c.writeJSON(ctx, map[string]any{
+		"type":           "update-asset",
+		"subscriptionId": subscriptionID,
+		"venue":          asset.Venue,
+		"currency":       asset.Currency,
+		"cash":           asset.Cash,
+		"available":      asset.Available,
+		"used":           asset.Used,
+		"equity":         asset.Equity,
+		"maxUsage":       asset.MaxUsage,
+	})
+}
+
+// UpdatePosition publishes the current venue position for one instrument/side.
+func (c *WebSocketSignalsClient) UpdatePosition(ctx context.Context, subscriptionID int64, position Position) error {
+	return c.writeJSON(ctx, map[string]any{
+		"type":            "update-position",
+		"subscriptionId":  subscriptionID,
+		"venue":           position.Venue,
+		"instrument":      position.Instrument,
+		"side":            position.Side(),
+		"status":          position.Status,
+		"size":            math.Abs(position.Size),
+		"entryPrice":      position.EntryPrice,
+		"markPrice":       position.LastPrice,
+		"margin":          positionMargin(position),
+		"leverage":        position.Leverage,
+		"takeProfitPrice": positiveOr(position.TakeProfitPrice, priceFromRisk(position.EntryPrice, position.Side(), position.TakeProfit)),
+		"stopLossPrice":   positiveOr(position.StopLossPrice, priceFromRisk(position.EntryPrice, oppositeSide(position.Side()), position.StopLoss)),
+	})
+}
+
+// AddInstrument adds one instrument to an existing basket.
+func (c *WebSocketSignalsClient) AddInstrument(ctx context.Context, subscriptionID int64, instrument string) error {
+	return c.writeJSON(ctx, map[string]any{"type": "add-instrument", "subscriptionId": subscriptionID, "instrument": instrument})
+}
+
+// RemoveInstrument removes one instrument from an existing basket.
+func (c *WebSocketSignalsClient) RemoveInstrument(ctx context.Context, subscriptionID int64, instrument string) error {
+	return c.writeJSON(ctx, map[string]any{"type": "remove-instrument", "subscriptionId": subscriptionID, "instrument": instrument})
+}
+
+func (c *WebSocketSignalsClient) UpdateConfig(ctx context.Context, subscriptionID int64, cfg RuntimeConfig) error {
+	return c.writeJSON(ctx, map[string]any{
+		"type":                "update-config",
+		"subscriptionId":      subscriptionID,
+		"profitWithdrawRatio": cfg.ProfitWithdrawRatio,
+	})
+}
+
+func (c *WebSocketSignalsClient) ScheduleWithdrawal(ctx context.Context, subscriptionID int64, withdrawal WithdrawalRequest) error {
+	return c.writeJSON(ctx, map[string]any{
+		"type":           "schedule-withdrawal",
+		"subscriptionId": subscriptionID,
+		"venue":          withdrawal.Venue,
+		"currency":       withdrawal.Currency,
+		"amount":         withdrawal.Amount,
+		"reason":         withdrawal.Reason,
+	})
+}
+
 // Unsubscribe removes a subscription by id.
-func (c *SignalsClient) Unsubscribe(ctx context.Context, subscriptionID int64) error {
+func (c *WebSocketSignalsClient) Unsubscribe(ctx context.Context, subscriptionID int64) error {
 	return c.writeJSON(ctx, map[string]any{
 		"type":           "unsubscribe",
 		"subscriptionId": subscriptionID,
 	})
 }
 
-// UnsubscribeInstrument removes a subscription by venue/instrument pair.
-func (c *SignalsClient) UnsubscribeInstrument(ctx context.Context, venue, instrument string) error {
-	return c.writeJSON(ctx, map[string]string{
+// UnsubscribeInstrument requests a legacy single-instrument unsubscribe.
+// Deprecated: new integrations should use SignalsManager and basket
+// subscriptions.
+func (c *WebSocketSignalsClient) UnsubscribeInstrument(ctx context.Context, venue, instrument string) error {
+	return c.writeJSON(ctx, map[string]any{
 		"type":       "unsubscribe",
 		"venue":      venue,
 		"instrument": instrument,
 	})
 }
 
-func (c *SignalsClient) writeJSON(ctx context.Context, payload any) error {
+func (c *WebSocketSignalsClient) writeJSON(ctx context.Context, payload any) error {
 	c.mu.Lock()
 	conn := c.conn
 	c.mu.Unlock()
@@ -265,7 +363,7 @@ func (c *SignalsClient) writeJSON(ctx context.Context, payload any) error {
 	}
 }
 
-func (c *SignalsClient) readLoop(conn *websocket.Conn, done <-chan struct{}) {
+func (c *WebSocketSignalsClient) readLoop(conn *websocket.Conn, done <-chan struct{}) {
 	defer c.closeStreams()
 	for {
 		_, data, err := conn.ReadMessage()
@@ -288,7 +386,7 @@ func (c *SignalsClient) readLoop(conn *websocket.Conn, done <-chan struct{}) {
 	}
 }
 
-func (c *SignalsClient) broadcastEvent(ev Event, done <-chan struct{}) bool {
+func (c *WebSocketSignalsClient) broadcastEvent(ev Event, done <-chan struct{}) bool {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	select {
@@ -306,7 +404,7 @@ func (c *SignalsClient) broadcastEvent(ev Event, done <-chan struct{}) bool {
 	return false
 }
 
-func (c *SignalsClient) broadcastError(err error, done <-chan struct{}) bool {
+func (c *WebSocketSignalsClient) broadcastError(err error, done <-chan struct{}) bool {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	select {
@@ -324,7 +422,7 @@ func (c *SignalsClient) broadcastError(err error, done <-chan struct{}) bool {
 	return false
 }
 
-func (c *SignalsClient) closeStreams() {
+func (c *WebSocketSignalsClient) closeStreams() {
 	c.subMu.Lock()
 	defer c.subMu.Unlock()
 	close(c.events)
@@ -334,4 +432,32 @@ func (c *SignalsClient) closeStreams() {
 		close(sub.errors)
 		delete(c.subscriptions, sub)
 	}
+}
+
+func positionMargin(position Position) float64 {
+	if position.Leverage <= 0 || position.EntryPrice <= 0 {
+		return 0
+	}
+	return math.Abs(position.Size) * position.EntryPrice / position.Leverage
+}
+
+func oppositeSide(side Side) Side {
+	switch side {
+	case SideBuy:
+		return SideSell
+	case SideSell:
+		return SideBuy
+	default:
+		return ""
+	}
+}
+
+func priceFromRisk(entry float64, side Side, risk float64) float64 {
+	if entry <= 0 || risk <= 0 {
+		return 0
+	}
+	if side == SideSell {
+		return entry * (1 - risk)
+	}
+	return entry * (1 + risk)
 }

@@ -139,7 +139,7 @@ type SharedClient struct {
 	cfg SharedClientConfig
 
 	mu              sync.RWMutex
-	client          *SignalsClient
+	client          *WebSocketSignalsClient
 	started         bool
 	connected       bool
 	connectionCount int
@@ -230,7 +230,7 @@ func (c *SharedClient) Subscribe(ctx context.Context, venue, instrument string) 
 	c.Start(ctx)
 	key := positionKey(venue, instrument)
 
-	var client *SignalsClient
+	var client *WebSocketSignalsClient
 	c.mu.Lock()
 	if !c.cfg.Enabled {
 		c.mu.Unlock()
@@ -250,7 +250,7 @@ func (c *SharedClient) Subscribe(ctx context.Context, venue, instrument string) 
 	c.mu.Unlock()
 
 	if shouldSubscribe && client != nil {
-		if err := client.Subscribe(ctx, venue, instrument); err != nil {
+		if err := client.SubscribeInstrument(ctx, venue, instrument); err != nil {
 			c.clearSubscriptionRequested(venue, instrument)
 			c.setLastError(err)
 		}
@@ -263,7 +263,7 @@ func (c *SharedClient) releaseSubscription(venue, instrument string) {
 	venue = NormalizeVenue(venue)
 	instrument = NormalizeInstrument(instrument)
 	key := positionKey(venue, instrument)
-	var client *SignalsClient
+	var client *WebSocketSignalsClient
 	var subscriptionID int64
 	var instrumentUnsubscribe bool
 
@@ -455,7 +455,7 @@ func (c *SharedClient) run(ctx context.Context) {
 			c.sleep(ctx, c.cfg.ReconnectMaxBackoff)
 			continue
 		}
-		client := NewSignalsClient(SignalsWebSocketToken(c.cfg.Token), WithURL(c.cfg.WebSocketURL))
+		client := NewWebSocketSignalsClient(SignalsWebSocketToken(c.cfg.Token), WithURL(c.cfg.WebSocketURL))
 		if err := client.Connect(ctx); err != nil {
 			c.setConnected(false)
 			c.broadcastSharedError(err)
@@ -496,7 +496,7 @@ func (c *SharedClient) run(ctx context.Context) {
 	}
 }
 
-func (c *SharedClient) subscribeAll(ctx context.Context, client *SignalsClient) {
+func (c *SharedClient) subscribeAll(ctx context.Context, client *WebSocketSignalsClient) {
 	c.mu.Lock()
 	subs := make([]sharedSubscriptionState, 0, len(c.subscriptions))
 	for _, sub := range c.subscriptions {
@@ -508,7 +508,7 @@ func (c *SharedClient) subscribeAll(ctx context.Context, client *SignalsClient) 
 	}
 	c.mu.Unlock()
 	for _, sub := range subs {
-		if err := client.Subscribe(ctx, sub.venue, sub.instrument); err != nil {
+		if err := client.SubscribeInstrument(ctx, sub.venue, sub.instrument); err != nil {
 			c.clearSubscriptionRequested(sub.venue, sub.instrument)
 			c.setLastError(err)
 		}
@@ -523,7 +523,7 @@ func (c *SharedClient) clearSubscriptionRequested(venue, instrument string) {
 	c.mu.Unlock()
 }
 
-func (c *SharedClient) readUntilDisconnected(ctx context.Context, client *SignalsClient) {
+func (c *SharedClient) readUntilDisconnected(ctx context.Context, client *WebSocketSignalsClient) {
 	for {
 		select {
 		case <-ctx.Done():

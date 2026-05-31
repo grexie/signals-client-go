@@ -1,6 +1,15 @@
 # Go Signalsbot Example
 
-Paper-trading command line bot for Grexie Signals. It subscribes to `SIGNALS_INSTRUMENTS`, reads OKX `candle1m` prices, feeds the Go client `PositionManager`, and persists open positions, closed trades, orders, and PnL snapshots in a local bbolt database.
+Minimal command line listener for the Bollinger router basket protocol.
+
+It subscribes to `SIGNALS_INSTRUMENTS` through `SignalsManager` and logs:
+
+- `create-market-order`
+- `update-tpsl`
+- `withdraw`
+- lifecycle/info/error events
+
+It deliberately does not place exchange orders. Use the emitted intents to wire your own paper trader or venue executor, then publish fills and positions back with `SignalsManager.UpdatePosition`.
 
 ## Run
 
@@ -8,23 +17,7 @@ Paper-trading command line bot for Grexie Signals. It subscribes to `SIGNALS_INS
 cd examples/signalsbot
 cp .env.example .env
 $EDITOR .env
-go run . papertrader
+go run .
 ```
 
-The bot logs every position open, close, margin add, and margin removal with order sizing, fees, PnL, take-profit, stop-loss, and confidence details. Every five minutes it prints position-manager stats and current PnL.
-
-Clean the local bbolt database with:
-
-```sh
-go run . clean
-```
-
-## Docker
-
-```sh
-cd examples/signalsbot
-cp .env.example .env
-docker compose up --build
-```
-
-The compose file stores the bbolt database in the `signalsbot-data` volume.
+Set `SIGNALS_WEBSOCKET_URL` for local testing, for example `ws://localhost:8080/public/ws`.
