@@ -111,6 +111,7 @@ type CreateMarketOrderEvent struct {
 	SubscriptionID  int64     `json:"subscriptionId"`
 	IntentID        string    `json:"intentId,omitempty"`
 	Action          string    `json:"action,omitempty"`
+	Reason          string    `json:"reason,omitempty"`
 	Venue           string    `json:"venue,omitempty"`
 	Instrument      string    `json:"instrument"`
 	Side            Side      `json:"side"`
@@ -206,6 +207,7 @@ type serverMessage struct {
 	Signal          json.RawMessage `json:"signal,omitempty"`
 	IntentID        string          `json:"intentId,omitempty"`
 	Action          string          `json:"action,omitempty"`
+	Reason          string          `json:"reason,omitempty"`
 	Side            Side            `json:"side,omitempty"`
 	OrderType       string          `json:"orderType,omitempty"`
 	ContractSize    float64         `json:"contractSize,omitempty"`
@@ -242,6 +244,7 @@ func ParseEvent(data []byte) (Event, error) {
 			SubscriptionID:  msg.SubscriptionID,
 			IntentID:        msg.IntentID,
 			Action:          msg.Action,
+			Reason:          msg.Reason,
 			Venue:           msg.Venue,
 			Instrument:      msg.Instrument,
 			Side:            msg.Side,

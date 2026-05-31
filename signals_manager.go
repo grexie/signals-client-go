@@ -85,6 +85,7 @@ type Intent struct {
 	SubscriptionID  int64
 	IntentID        string
 	Action          string
+	Reason          string
 	Venue           string
 	Instrument      string
 	Side            Side
@@ -523,6 +524,7 @@ func (m *SignalsManager) handleEvent(ctx context.Context, event Event) {
 			SubscriptionID:  ev.SubscriptionID,
 			IntentID:        ev.IntentID,
 			Action:          ev.Action,
+			Reason:          ev.Reason,
 			Venue:           ev.Venue,
 			Instrument:      ev.Instrument,
 			Side:            ev.Side,

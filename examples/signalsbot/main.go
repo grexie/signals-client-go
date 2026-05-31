@@ -92,8 +92,8 @@ func run() error {
 		case <-ctx.Done():
 			return nil
 		case intent := <-intents:
-			log.Printf("create-market-order intent=%s action=%s instrument=%s side=%s size=%.8f leverage=%.2f reduceOnly=%t tp=%.4f sl=%.4f",
-				intent.IntentID, intent.Action, intent.Instrument, intent.Side, intent.ContractSize, intent.Leverage, intent.ReduceOnly, intent.TakeProfit, intent.StopLoss)
+			log.Printf("create-market-order intent=%s action=%s reason=%s instrument=%s side=%s size=%.8f leverage=%.2f reduceOnly=%t tp=%.4f sl=%.4f",
+				intent.IntentID, intent.Action, intent.Reason, intent.Instrument, intent.Side, intent.ContractSize, intent.Leverage, intent.ReduceOnly, intent.TakeProfit, intent.StopLoss)
 		case update := <-protections:
 			log.Printf("update-tpsl intent=%s instrument=%s side=%s takeProfitPrice=%.8f stopLossPrice=%.8f", update.IntentID, update.Instrument, update.Side, update.TakeProfitPrice, update.StopLossPrice)
 		case withdrawal := <-withdrawals:

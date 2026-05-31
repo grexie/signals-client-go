@@ -3,7 +3,7 @@
 Typed Go client for the Grexie Signals Bollinger router websocket protocol.
 
 ```sh
-go get github.com/grexie/signals-client-go@v0.1.19
+go get github.com/grexie/signals-client-go@v0.1.20
 ```
 
 ## SignalsManager
