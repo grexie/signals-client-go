@@ -33,6 +33,8 @@ func (r SubscribeRequest) normalized() SubscribeRequest {
 	r.Venue = NormalizeVenue(firstNonEmpty(r.Venue, "okx"))
 	r.Instruments = normalizeInstrumentList(r.Instruments)
 	r.Mode = strings.TrimSpace(r.Mode)
+	r.Risk = normalizeRiskConfig(r.Risk)
+	r.ProfitWithdrawRatio = clamp01(r.ProfitWithdrawRatio)
 	for i := range r.Assets {
 		r.Assets[i].Venue = firstNonEmpty(r.Assets[i].Venue, r.Venue)
 	}
@@ -45,6 +47,7 @@ func (r SubscribeRequest) normalized() SubscribeRequest {
 // RiskConfig configures basket-level capital and switching constraints.
 type RiskConfig struct {
 	MaxMarginRatio         float64 `json:"maxMarginRatio,omitempty"`
+	MinLotHaircutRatio     float64 `json:"minLotHaircutRatio,omitempty"`
 	MaxConcurrentPositions int     `json:"maxConcurrentPositions,omitempty"`
 	MaxDrawdown            float64 `json:"maxDrawdown,omitempty"`
 	SwitchBuffer           float64 `json:"switchBuffer,omitempty"`
@@ -54,7 +57,14 @@ type RiskConfig struct {
 }
 
 type RuntimeConfig struct {
-	ProfitWithdrawRatio float64 `json:"profitWithdrawRatio,omitempty"`
+	MaxMarginRatio         float64 `json:"maxMarginRatio,omitempty"`
+	MinLotHaircutRatio     float64 `json:"minLotHaircutRatio,omitempty"`
+	MaxConcurrentPositions int     `json:"maxConcurrentPositions,omitempty"`
+	MaxDrawdown            float64 `json:"maxDrawdown,omitempty"`
+	SwitchBuffer           float64 `json:"switchBuffer,omitempty"`
+	MinLeverage            float64 `json:"minLeverage,omitempty"`
+	MaxLeverage            float64 `json:"maxLeverage,omitempty"`
+	ProfitWithdrawRatio    float64 `json:"profitWithdrawRatio,omitempty"`
 }
 
 type WithdrawalRequest struct {
@@ -172,13 +182,99 @@ func normalizeSignalsManagerConfig(cfg SignalsManagerConfig) SignalsManagerConfi
 	cfg.Venue = NormalizeVenue(firstNonEmpty(cfg.Venue, "okx"))
 	cfg.Instruments = normalizeInstrumentList(cfg.Instruments)
 	cfg.Mode = strings.TrimSpace(cfg.Mode)
-	if cfg.Risk.MinLeverage < 0 {
-		cfg.Risk.MinLeverage = 0
-	}
-	if cfg.Risk.MaxLeverage < 0 {
-		cfg.Risk.MaxLeverage = 0
-	}
+	cfg.Risk = normalizeRiskConfig(cfg.Risk)
+	cfg.ProfitWithdrawRatio = clamp01(cfg.ProfitWithdrawRatio)
 	return cfg
+}
+
+func normalizeRiskConfig(risk RiskConfig) RiskConfig {
+	if risk.MaxMarginRatio <= 0 {
+		risk.MaxMarginRatio = 1
+	}
+	if risk.MaxMarginRatio > 1 {
+		risk.MaxMarginRatio = 1
+	}
+	if risk.MinLotHaircutRatio < 0 {
+		risk.MinLotHaircutRatio = 0
+	}
+	if risk.MaxConcurrentPositions < 0 {
+		risk.MaxConcurrentPositions = 0
+	}
+	if risk.MaxDrawdown < 0 {
+		risk.MaxDrawdown = 0
+	}
+	if risk.SwitchBuffer < 0 {
+		risk.SwitchBuffer = 0
+	}
+	if risk.MinLeverage < 0 {
+		risk.MinLeverage = 0
+	}
+	if risk.MaxLeverage < 0 {
+		risk.MaxLeverage = 0
+	}
+	if risk.MaxLeverage > 0 && risk.MinLeverage > risk.MaxLeverage {
+		risk.MinLeverage = risk.MaxLeverage
+	}
+	risk.ProfitWithdrawRatio = clamp01(risk.ProfitWithdrawRatio)
+	return risk
+}
+
+func normalizeRuntimeConfig(cfg RuntimeConfig) RuntimeConfig {
+	if cfg.MaxMarginRatio < 0 {
+		cfg.MaxMarginRatio = 0
+	}
+	if cfg.MaxMarginRatio > 1 {
+		cfg.MaxMarginRatio = 1
+	}
+	if cfg.MinLotHaircutRatio < 0 {
+		cfg.MinLotHaircutRatio = 0
+	}
+	if cfg.MaxConcurrentPositions < 0 {
+		cfg.MaxConcurrentPositions = 0
+	}
+	if cfg.MaxDrawdown < 0 {
+		cfg.MaxDrawdown = 0
+	}
+	if cfg.SwitchBuffer < 0 {
+		cfg.SwitchBuffer = 0
+	}
+	if cfg.MinLeverage < 0 {
+		cfg.MinLeverage = 0
+	}
+	if cfg.MaxLeverage < 0 {
+		cfg.MaxLeverage = 0
+	}
+	if cfg.MaxLeverage > 0 && cfg.MinLeverage > cfg.MaxLeverage {
+		cfg.MinLeverage = cfg.MaxLeverage
+	}
+	cfg.ProfitWithdrawRatio = clamp01(cfg.ProfitWithdrawRatio)
+	return cfg
+}
+
+func applyRuntimeConfigToRisk(risk RiskConfig, cfg RuntimeConfig) RiskConfig {
+	if cfg.MaxMarginRatio > 0 {
+		risk.MaxMarginRatio = cfg.MaxMarginRatio
+	}
+	if cfg.MinLotHaircutRatio > 0 {
+		risk.MinLotHaircutRatio = cfg.MinLotHaircutRatio
+	}
+	if cfg.MaxConcurrentPositions > 0 {
+		risk.MaxConcurrentPositions = cfg.MaxConcurrentPositions
+	}
+	if cfg.MaxDrawdown > 0 {
+		risk.MaxDrawdown = cfg.MaxDrawdown
+	}
+	if cfg.SwitchBuffer > 0 {
+		risk.SwitchBuffer = cfg.SwitchBuffer
+	}
+	if cfg.MinLeverage > 0 {
+		risk.MinLeverage = cfg.MinLeverage
+	}
+	if cfg.MaxLeverage > 0 {
+		risk.MaxLeverage = cfg.MaxLeverage
+	}
+	risk.ProfitWithdrawRatio = cfg.ProfitWithdrawRatio
+	return normalizeRiskConfig(risk)
 }
 
 func (m *SignalsManager) Run(ctx context.Context) error {
@@ -459,8 +555,9 @@ func (m *SignalsManager) UpdateConfig(ctx context.Context, cfg RuntimeConfig) er
 	if m == nil {
 		return nil
 	}
-	cfg.ProfitWithdrawRatio = clamp01(cfg.ProfitWithdrawRatio)
+	cfg = normalizeRuntimeConfig(cfg)
 	m.mu.Lock()
+	m.cfg.Risk = applyRuntimeConfigToRisk(m.cfg.Risk, cfg)
 	m.cfg.ProfitWithdrawRatio = cfg.ProfitWithdrawRatio
 	subscriptionID := m.subscriptionID
 	m.mu.Unlock()

@@ -300,10 +300,18 @@ func (c *WebSocketSignalsClient) RemoveInstrument(ctx context.Context, subscript
 }
 
 func (c *WebSocketSignalsClient) UpdateConfig(ctx context.Context, subscriptionID int64, cfg RuntimeConfig) error {
+	cfg = normalizeRuntimeConfig(cfg)
 	return c.writeJSON(ctx, map[string]any{
-		"type":                "update-config",
-		"subscriptionId":      subscriptionID,
-		"profitWithdrawRatio": cfg.ProfitWithdrawRatio,
+		"type":                   "update-config",
+		"subscriptionId":         subscriptionID,
+		"maxMarginRatio":         cfg.MaxMarginRatio,
+		"minLotHaircutRatio":     cfg.MinLotHaircutRatio,
+		"maxConcurrentPositions": cfg.MaxConcurrentPositions,
+		"maxDrawdown":            cfg.MaxDrawdown,
+		"switchBuffer":           cfg.SwitchBuffer,
+		"minLeverage":            cfg.MinLeverage,
+		"maxLeverage":            cfg.MaxLeverage,
+		"profitWithdrawRatio":    cfg.ProfitWithdrawRatio,
 	})
 }
 

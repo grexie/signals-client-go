@@ -164,6 +164,53 @@ func TestSignalsClientSubscribe(t *testing.T) {
 	}
 }
 
+func TestSignalsClientUpdateConfigCarriesRouterRisk(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	requests := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		var msg map[string]any
+		if err := conn.ReadJSON(&msg); err != nil {
+			t.Fatal(err)
+		}
+		requests <- msg
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	client := NewWebSocketSignalsClient("ws_test", WithURL(wsURL))
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := client.Connect(ctx); err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	err := client.UpdateConfig(ctx, 42, RuntimeConfig{
+		MaxMarginRatio:         0.70,
+		MinLotHaircutRatio:     0.05,
+		MaxConcurrentPositions: 2,
+		MinLeverage:            1,
+		MaxLeverage:            6,
+		ProfitWithdrawRatio:    0.30,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case msg := <-requests:
+		if msg["type"] != "update-config" || msg["subscriptionId"] != float64(42) || msg["maxMarginRatio"] != 0.70 || msg["minLotHaircutRatio"] != 0.05 || msg["maxConcurrentPositions"] != float64(2) || msg["minLeverage"] != float64(1) || msg["maxLeverage"] != float64(6) || msg["profitWithdrawRatio"] != 0.30 {
+			encoded, _ := json.Marshal(msg)
+			t.Fatalf("unexpected update-config request: %s", encoded)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+}
+
 func TestSignalsClientFansOutEvents(t *testing.T) {
 	upgrader := websocket.Upgrader{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

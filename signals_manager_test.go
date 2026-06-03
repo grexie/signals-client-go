@@ -12,6 +12,9 @@ type managerTestClient struct {
 	errs              chan error
 	subscribed        chan struct{}
 	unsubscribeCtxErr chan error
+	subscribeRequest  SubscribeRequest
+	updateConfigID    int64
+	updateConfig      RuntimeConfig
 }
 
 func newManagerTestClient() *managerTestClient {
@@ -23,7 +26,8 @@ func newManagerTestClient() *managerTestClient {
 	}
 }
 
-func (c *managerTestClient) Subscribe(context.Context, SubscribeRequest) (int64, error) {
+func (c *managerTestClient) Subscribe(_ context.Context, request SubscribeRequest) (int64, error) {
+	c.subscribeRequest = request
 	close(c.subscribed)
 	return 44, nil
 }
@@ -32,7 +36,9 @@ func (c *managerTestClient) UpdateAsset(context.Context, int64, AssetSnapshot) e
 func (c *managerTestClient) UpdatePosition(context.Context, int64, Position) error   { return nil }
 func (c *managerTestClient) AddInstrument(context.Context, int64, string) error      { return nil }
 func (c *managerTestClient) RemoveInstrument(context.Context, int64, string) error   { return nil }
-func (c *managerTestClient) UpdateConfig(context.Context, int64, RuntimeConfig) error {
+func (c *managerTestClient) UpdateConfig(_ context.Context, id int64, cfg RuntimeConfig) error {
+	c.updateConfigID = id
+	c.updateConfig = cfg
 	return nil
 }
 func (c *managerTestClient) ScheduleWithdrawal(context.Context, int64, WithdrawalRequest) error {
@@ -140,6 +146,48 @@ func TestSignalsManagerFanoutSubscriptionsCloseWithContext(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("intent subscriber did not close after context cancellation")
+	}
+}
+
+func TestSignalsManagerDefaultsAndRuntimeRiskConfig(t *testing.T) {
+	client := newManagerTestClient()
+	manager := NewSignalsManager(client, SignalsManagerState{}, SignalsManagerConfig{
+		Venue:       "OKX",
+		Instruments: []string{"ethusdt"},
+		Risk: RiskConfig{
+			MinLeverage: 1,
+			MaxLeverage: 3,
+		},
+		ProfitWithdrawRatio: 0.20,
+	})
+	if err := manager.Subscribe(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if client.subscribeRequest.Risk.MaxMarginRatio != 1 {
+		t.Fatalf("default maxMarginRatio = %v, want 1", client.subscribeRequest.Risk.MaxMarginRatio)
+	}
+	if client.subscribeRequest.Risk.MinLotHaircutRatio != 0 {
+		t.Fatalf("default minLotHaircutRatio = %v, want 0", client.subscribeRequest.Risk.MinLotHaircutRatio)
+	}
+	if client.subscribeRequest.ProfitWithdrawRatio != 0.20 {
+		t.Fatalf("profitWithdrawRatio = %v, want 0.20", client.subscribeRequest.ProfitWithdrawRatio)
+	}
+
+	err := manager.UpdateConfig(context.Background(), RuntimeConfig{
+		MaxMarginRatio:      0.75,
+		MinLotHaircutRatio:  0.08,
+		MinLeverage:         2,
+		MaxLeverage:         5,
+		ProfitWithdrawRatio: 0.35,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.updateConfigID != 44 {
+		t.Fatalf("update subscription id = %v, want 44", client.updateConfigID)
+	}
+	if client.updateConfig.MaxMarginRatio != 0.75 || client.updateConfig.MinLotHaircutRatio != 0.08 || client.updateConfig.MinLeverage != 2 || client.updateConfig.MaxLeverage != 5 || client.updateConfig.ProfitWithdrawRatio != 0.35 {
+		t.Fatalf("unexpected runtime config: %+v", client.updateConfig)
 	}
 }
 

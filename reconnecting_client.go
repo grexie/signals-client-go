@@ -130,11 +130,11 @@ func (c *ReconnectingSignalsClient) RemoveInstrument(ctx context.Context, subscr
 }
 
 func (c *ReconnectingSignalsClient) UpdateConfig(ctx context.Context, subscriptionID int64, cfg RuntimeConfig) error {
-	cfg.ProfitWithdrawRatio = clamp01(cfg.ProfitWithdrawRatio)
+	cfg = normalizeRuntimeConfig(cfg)
 	c.mu.Lock()
 	if req, ok := c.subscriptions[subscriptionID]; ok {
 		req.ProfitWithdrawRatio = cfg.ProfitWithdrawRatio
-		req.Risk.ProfitWithdrawRatio = cfg.ProfitWithdrawRatio
+		req.Risk = applyRuntimeConfigToRisk(req.Risk, cfg)
 		c.subscriptions[subscriptionID] = req
 	}
 	transport := c.transport
