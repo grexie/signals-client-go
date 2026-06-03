@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
 	"time"
 )
 
@@ -16,6 +17,16 @@ type Side string
 const (
 	SideBuy  Side = "buy"
 	SideSell Side = "sell"
+)
+
+// InfoLevel classifies the visibility/severity of an info event.
+type InfoLevel string
+
+const (
+	InfoLevelInfo  InfoLevel = "info"
+	InfoLevelError InfoLevel = "error"
+	InfoLevelWarn  InfoLevel = "warn"
+	InfoLevelDebug InfoLevel = "debug"
 )
 
 // SignalComponent describes one timeframe contribution to an aggregate signal.
@@ -252,6 +263,7 @@ type InfoEvent struct {
 	SubscriptionID int64      `json:"subscriptionId"`
 	Venue          string     `json:"venue"`
 	Instrument     string     `json:"instrument"`
+	Level          InfoLevel  `json:"level"`
 	Stage          string     `json:"stage"`
 	Message        string     `json:"message"`
 	Timestamp      time.Time  `json:"timestamp"`
@@ -394,6 +406,7 @@ type serverMessage struct {
 	Code            string          `json:"code,omitempty"`
 	Message         string          `json:"message,omitempty"`
 	Stage           string          `json:"stage,omitempty"`
+	Level           string          `json:"level,omitempty"`
 	Timestamp       *time.Time      `json:"timestamp,omitempty"`
 	Replay          bool            `json:"replay,omitempty"`
 	ReplayedAt      *time.Time      `json:"replayedAt,omitempty"`
@@ -415,6 +428,15 @@ type serverMessage struct {
 	StopLoss        float64         `json:"stopLoss,omitempty"`
 	Currency        string          `json:"currency,omitempty"`
 	Amount          float64         `json:"amount,omitempty"`
+}
+
+func normalizeInfoLevel(level string) InfoLevel {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "error", "warn", "debug":
+		return InfoLevel(strings.ToLower(strings.TrimSpace(level)))
+	default:
+		return InfoLevelInfo
+	}
 }
 
 // ParseEvent decodes one raw websocket JSON message into the corresponding
@@ -499,6 +521,7 @@ func ParseEvent(data []byte) (Event, error) {
 			SubscriptionID: msg.SubscriptionID,
 			Venue:          msg.Venue,
 			Instrument:     msg.Instrument,
+			Level:          normalizeInfoLevel(msg.Level),
 			Stage:          msg.Stage,
 			Message:        msg.Message,
 			Timestamp:      ts,

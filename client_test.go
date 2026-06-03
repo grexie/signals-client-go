@@ -41,7 +41,7 @@ func TestParseSignalEvent(t *testing.T) {
 }
 
 func TestParseInfoAndErrorEvents(t *testing.T) {
-	infoRaw := []byte(`{"type":"info","subscriptionId":9,"venue":"okx","instrument":"ETH-USDT-SWAP","stage":"ready","message":"ready","timestamp":"2026-05-26T00:00:00Z","replay":true,"replayedAt":"2026-05-26T00:00:01Z"}`)
+	infoRaw := []byte(`{"type":"info","subscriptionId":9,"venue":"okx","instrument":"ETH-USDT-SWAP","level":"debug","stage":"ready","message":"ready","timestamp":"2026-05-26T00:00:00Z","replay":true,"replayedAt":"2026-05-26T00:00:01Z"}`)
 	infoEvent, err := ParseEvent(infoRaw)
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +50,16 @@ func TestParseInfoAndErrorEvents(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected InfoEvent, got %T", infoEvent)
 	}
-	if info.Stage != "ready" || !info.Replay || info.ReplayedAt == nil {
+	if info.Level != "debug" || info.Stage != "ready" || !info.Replay || info.ReplayedAt == nil {
 		t.Fatalf("unexpected info event: %+v", info)
+	}
+	defaultInfoEvent, err := ParseEvent([]byte(`{"type":"info","subscriptionId":9,"venue":"okx","instrument":"ETH-USDT-SWAP","stage":"ready","message":"ready"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultInfo, ok := defaultInfoEvent.(InfoEvent)
+	if !ok || defaultInfo.Level != "info" {
+		t.Fatalf("unexpected default info level: %+v", defaultInfoEvent)
 	}
 
 	errorEvent, err := ParseEvent([]byte(`{"type":"error","code":"forbidden","message":"no access"}`))

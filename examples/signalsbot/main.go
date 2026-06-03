@@ -105,7 +105,7 @@ func run() error {
 			case signalsclient.SubscribedEvent:
 				log.Printf("subscribed subscription=%d venue=%s", ev.SubscriptionID, ev.Venue)
 			case signalsclient.InfoEvent:
-				log.Printf("info instrument=%s stage=%s message=%q", ev.Instrument, ev.Stage, ev.Message)
+				log.Printf("info level=%s instrument=%s stage=%s message=%q", ev.Level, ev.Instrument, ev.Stage, ev.Message)
 			case signalsclient.ErrorEvent:
 				log.Printf("server error code=%s message=%q", ev.Code, ev.Message)
 			}
