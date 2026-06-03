@@ -192,8 +192,7 @@ func (c *WebSocketSignalsClient) Errors() <-chan error {
 }
 
 // SubscribeEvents returns an independent fan-out stream of events for one
-// consumer. Use this when several components, such as multiple PositionManager
-// instances, share one SignalsClient.
+// consumer. Use this when several components share one SignalsClient.
 func (c *WebSocketSignalsClient) SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error) {
 	sub := &eventSubscription{
 		events: make(chan Event, c.cfg.bufferSize),

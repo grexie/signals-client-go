@@ -3,6 +3,7 @@ package signalsclient
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
 
@@ -31,9 +32,7 @@ type SignalComponent struct {
 
 // Signal is the public signal payload sent by the Grexie Signals websocket.
 //
-// Price and Timestamp are optional forward-compatible fields. Current server
-// websocket messages carry Timestamp on the envelope; PositionManager will use
-// the event timestamp when HandleEvent is called.
+// Price and Timestamp are optional forward-compatible fields.
 type Signal struct {
 	Venue                  string            `json:"venue"`
 	Instrument             string            `json:"instrument"`
@@ -70,6 +69,71 @@ type Signal struct {
 	ManagePositionsOnly    bool              `json:"managePositionsOnly,omitempty"`
 	Timestamp              time.Time         `json:"timestamp,omitempty"`
 	Price                  float64           `json:"price,omitempty"`
+}
+
+// AssetSnapshot is the current account state for a settlement currency.
+type AssetSnapshot struct {
+	Venue     string    `json:"venue,omitempty"`
+	Currency  string    `json:"currency"`
+	Cash      float64   `json:"cash"`
+	Available float64   `json:"available"`
+	Used      float64   `json:"used"`
+	Equity    float64   `json:"equity"`
+	MaxUsage  float64   `json:"maxUsage,omitempty"`
+	UpdatedAt time.Time `json:"updatedAt,omitempty"`
+}
+
+// Position is the current venue position for one instrument.
+type Position struct {
+	Venue                  string
+	Instrument             string
+	Status                 string
+	Size                   float64
+	Confidence             float64
+	EntryPrice             float64
+	LastPrice              float64
+	TakeProfit             float64
+	StopLoss               float64
+	TakeProfitPrice        float64
+	StopLossPrice          float64
+	TrailingStopActivation float64
+	TrailingStopDistance   float64
+	TrailingStopMinProfit  float64
+	Leverage               float64
+	MFE                    float64
+	MAE                    float64
+	RealizedGross          float64
+	Fees                   float64
+	RealizedPnL            float64
+	OpenedAt               time.Time
+	LastSignalAt           time.Time
+}
+
+// Side returns the current position direction.
+func (p Position) Side() Side {
+	if p.Size < 0 {
+		return SideSell
+	}
+	if p.Size > 0 {
+		return SideBuy
+	}
+	return ""
+}
+
+// UnrealizedPnL returns approximate settlement-currency PnL for linear
+// instruments that have a contract value of 1.
+func (p Position) UnrealizedPnL() float64 {
+	return p.move() * math.Abs(p.Size) * positiveOr(p.EntryPrice, 1)
+}
+
+func (p Position) move() float64 {
+	if p.EntryPrice == 0 || p.LastPrice == 0 {
+		return 0
+	}
+	if p.Size < 0 {
+		return (p.EntryPrice - p.LastPrice) / p.EntryPrice
+	}
+	return (p.LastPrice - p.EntryPrice) / p.EntryPrice
 }
 
 // Event is implemented by every websocket event emitted by SignalsClient.

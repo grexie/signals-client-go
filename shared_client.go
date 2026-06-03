@@ -134,7 +134,7 @@ type sharedEventSubscription struct {
 
 // SharedClient owns one reconnecting websocket and a process-wide in-memory
 // signal cache. It deduplicates subscribe/unsubscribe requests for all local
-// consumers and also implements EventSource for PositionManager.
+// consumers and exposes reconnect-safe event fan-out.
 type SharedClient struct {
 	cfg SharedClientConfig
 
@@ -393,7 +393,7 @@ func (c *SharedClient) SubscribeUpdates(ctx context.Context) <-chan struct{} {
 	return out
 }
 
-// SubscribeEvents implements EventSource with reconnect-safe event fan-out.
+// SubscribeEvents returns reconnect-safe event fan-out.
 func (c *SharedClient) SubscribeEvents(ctx context.Context) (<-chan Event, <-chan error) {
 	sub := &sharedEventSubscription{events: make(chan Event, 128), errors: make(chan error, 128)}
 	if c == nil {
