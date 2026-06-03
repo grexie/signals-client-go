@@ -169,6 +169,28 @@ type UnsubscribedEvent struct {
 
 func (UnsubscribedEvent) EventType() string { return "unsubscribed" }
 
+// BasketUpdatedEvent confirms that a live basket update was accepted and
+// forwarded to the router.
+type BasketUpdatedEvent struct {
+	SubscriptionID int64  `json:"subscriptionId"`
+	Venue          string `json:"venue,omitempty"`
+	BasketID       string `json:"basketId,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
+func (BasketUpdatedEvent) EventType() string { return "basket_updated" }
+
+// OrderRouterForwardedEvent acknowledges a client-to-router account, order, or
+// withdrawal update.
+type OrderRouterForwardedEvent struct {
+	SubscriptionID int64  `json:"subscriptionId"`
+	Venue          string `json:"venue,omitempty"`
+	BasketID       string `json:"basketId,omitempty"`
+	Message        string `json:"message,omitempty"`
+}
+
+func (OrderRouterForwardedEvent) EventType() string { return "order_router_forwarded" }
+
 // CreateMarketOrderEvent asks the client-side venue executor to submit a
 // market order. Execution still lives with the client/user, not the Signals
 // server.
@@ -368,6 +390,7 @@ type serverMessage struct {
 	SubscriptionID  int64           `json:"subscriptionId,omitempty"`
 	Venue           string          `json:"venue,omitempty"`
 	Instrument      string          `json:"instrument,omitempty"`
+	BasketID        string          `json:"basketId,omitempty"`
 	Code            string          `json:"code,omitempty"`
 	Message         string          `json:"message,omitempty"`
 	Stage           string          `json:"stage,omitempty"`
@@ -408,6 +431,10 @@ func ParseEvent(data []byte) (Event, error) {
 		return SubscribedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, Instrument: msg.Instrument}, nil
 	case "unsubscribed":
 		return UnsubscribedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, Instrument: msg.Instrument, Code: msg.Code, Message: msg.Message}, nil
+	case "basket_updated":
+		return BasketUpdatedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, BasketID: msg.BasketID, Message: msg.Message}, nil
+	case "order_router_forwarded":
+		return OrderRouterForwardedEvent{SubscriptionID: msg.SubscriptionID, Venue: msg.Venue, BasketID: msg.BasketID, Message: msg.Message}, nil
 	case "create-market-order":
 		ts := time.Time{}
 		if msg.Timestamp != nil {
@@ -539,4 +566,14 @@ func ParseEvent(data []byte) (Event, error) {
 	default:
 		return nil, fmt.Errorf("signalsclient: unsupported websocket event type %q", msg.Type)
 	}
+}
+
+func ignoreWebsocketMessage(data []byte) bool {
+	var msg struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(data, &msg); err != nil {
+		return false
+	}
+	return msg.Type == "basket_state"
 }

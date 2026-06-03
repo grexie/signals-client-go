@@ -68,6 +68,30 @@ func TestParseInfoAndErrorEvents(t *testing.T) {
 }
 
 func TestParseOrderRouterEvents(t *testing.T) {
+	basketUpdatedEvent, err := ParseEvent([]byte(`{"type":"basket_updated","subscriptionId":12,"venue":"okx","message":"active"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	basketUpdated, ok := basketUpdatedEvent.(BasketUpdatedEvent)
+	if !ok {
+		t.Fatalf("expected BasketUpdatedEvent, got %T", basketUpdatedEvent)
+	}
+	if basketUpdated.SubscriptionID != 12 || basketUpdated.Venue != "okx" || basketUpdated.Message != "active" {
+		t.Fatalf("unexpected basket_updated event: %+v", basketUpdated)
+	}
+
+	forwardedEvent, err := ParseEvent([]byte(`{"type":"order_router_forwarded","subscriptionId":12}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	forwarded, ok := forwardedEvent.(OrderRouterForwardedEvent)
+	if !ok {
+		t.Fatalf("expected OrderRouterForwardedEvent, got %T", forwardedEvent)
+	}
+	if forwarded.SubscriptionID != 12 {
+		t.Fatalf("unexpected order_router_forwarded event: %+v", forwarded)
+	}
+
 	orderEvent, err := ParseEvent([]byte(`{"type":"create-market-order","subscriptionId":12,"intentId":"intent_1","reason":"preempted_by_better_route","venue":"okx","instrument":"BTC-USDT-SWAP","side":"buy","orderType":"market","contractSize":3,"margin":125.5,"leverage":2,"confidence":0.73}`))
 	if err != nil {
 		t.Fatal(err)
@@ -114,6 +138,39 @@ func TestParseOrderRouterEvents(t *testing.T) {
 	}
 	if backtest.SubscriptionID != 12 || backtest.Backtest.Candidate.Trades != 3 || len(backtest.Backtest.Candidate.Instruments) != 1 {
 		t.Fatalf("unexpected backtest event: %+v", backtest)
+	}
+}
+
+func TestSignalsClientDropsBasketStateMessages(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer conn.Close()
+		_ = conn.WriteJSON(map[string]any{"type": "basket_state", "subscriptionId": 9, "venue": "okx", "message": "active"})
+		_ = conn.WriteJSON(map[string]any{"type": "order_router_forwarded", "subscriptionId": 9})
+		time.Sleep(25 * time.Millisecond)
+	}))
+	defer server.Close()
+
+	client := NewWebSocketSignalsClient("ws_test", WithURL("ws"+strings.TrimPrefix(server.URL, "http")))
+	defer client.Close()
+	if err := client.Connect(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ev, err := client.Receive(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ev.EventType() != "order_router_forwarded" {
+		t.Fatalf("event=%s want order_router_forwarded", ev.EventType())
+	}
+	select {
+	case err := <-client.Errors():
+		t.Fatalf("unexpected client error: %v", err)
+	default:
 	}
 }
 

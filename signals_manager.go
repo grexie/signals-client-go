@@ -767,6 +767,10 @@ func eventSubscriptionID(event Event) int64 {
 		return ev.SubscriptionID
 	case UnsubscribedEvent:
 		return ev.SubscriptionID
+	case BasketUpdatedEvent:
+		return ev.SubscriptionID
+	case OrderRouterForwardedEvent:
+		return ev.SubscriptionID
 	case InfoEvent:
 		return ev.SubscriptionID
 	case BacktestEvent:

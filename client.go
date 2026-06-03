@@ -382,6 +382,9 @@ func (c *WebSocketSignalsClient) readLoop(conn *websocket.Conn, done <-chan stru
 			}
 			return
 		}
+		if ignoreWebsocketMessage(data) {
+			continue
+		}
 		ev, err := ParseEvent(data)
 		if err != nil {
 			if c.broadcastError(err, done) {
