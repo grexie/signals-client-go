@@ -299,6 +299,7 @@ func (c *WebSocketSignalsClient) RemoveInstrument(ctx context.Context, subscript
 	return c.writeJSON(ctx, map[string]any{"type": "remove-instrument", "subscriptionId": subscriptionID, "instrument": instrument})
 }
 
+// UpdateConfig sends a live router config patch for one subscription.
 func (c *WebSocketSignalsClient) UpdateConfig(ctx context.Context, subscriptionID int64, cfg RuntimeConfig) error {
 	cfg = normalizeRuntimeConfig(cfg)
 	return c.writeJSON(ctx, map[string]any{
@@ -315,6 +316,7 @@ func (c *WebSocketSignalsClient) UpdateConfig(ctx context.Context, subscriptionI
 	})
 }
 
+// ScheduleWithdrawal asks the router to make room for a withdrawal request.
 func (c *WebSocketSignalsClient) ScheduleWithdrawal(ctx context.Context, subscriptionID int64, withdrawal WithdrawalRequest) error {
 	return c.writeJSON(ctx, map[string]any{
 		"type":           "schedule-withdrawal",

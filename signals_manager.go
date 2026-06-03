@@ -46,32 +46,54 @@ func (r SubscribeRequest) normalized() SubscribeRequest {
 
 // RiskConfig configures basket-level capital and switching constraints.
 type RiskConfig struct {
-	MaxMarginRatio         float64 `json:"maxMarginRatio,omitempty"`
-	MinLotHaircutRatio     float64 `json:"minLotHaircutRatio,omitempty"`
-	MaxConcurrentPositions int     `json:"maxConcurrentPositions,omitempty"`
-	MaxDrawdown            float64 `json:"maxDrawdown,omitempty"`
-	SwitchBuffer           float64 `json:"switchBuffer,omitempty"`
-	MinLeverage            float64 `json:"minLeverage,omitempty"`
-	MaxLeverage            float64 `json:"maxLeverage,omitempty"`
-	ProfitWithdrawRatio    float64 `json:"profitWithdrawRatio,omitempty"`
+	// MaxMarginRatio is the fraction of account cash the router may reserve for active positions.
+	MaxMarginRatio float64 `json:"maxMarginRatio,omitempty"`
+	// MinLotHaircutRatio is the extra cash buffer applied to lot margin and fees.
+	MinLotHaircutRatio float64 `json:"minLotHaircutRatio,omitempty"`
+	// MaxConcurrentPositions caps simultaneous active positions; zero leaves it unset.
+	MaxConcurrentPositions int `json:"maxConcurrentPositions,omitempty"`
+	// MaxDrawdown configures the optional drawdown guard; zero leaves it unset.
+	MaxDrawdown float64 `json:"maxDrawdown,omitempty"`
+	// SwitchBuffer is the score buffer required before switching instruments.
+	SwitchBuffer float64 `json:"switchBuffer,omitempty"`
+	// MinLeverage is the minimum leverage the router may request.
+	MinLeverage float64 `json:"minLeverage,omitempty"`
+	// MaxLeverage is the maximum leverage the router may request.
+	MaxLeverage float64 `json:"maxLeverage,omitempty"`
+	// ProfitWithdrawRatio is the fraction of profits eligible for withdrawal events.
+	ProfitWithdrawRatio float64 `json:"profitWithdrawRatio,omitempty"`
 }
 
+// RuntimeConfig is a live router risk/config patch sent after subscription.
 type RuntimeConfig struct {
-	MaxMarginRatio         float64 `json:"maxMarginRatio,omitempty"`
-	MinLotHaircutRatio     float64 `json:"minLotHaircutRatio,omitempty"`
-	MaxConcurrentPositions int     `json:"maxConcurrentPositions,omitempty"`
-	MaxDrawdown            float64 `json:"maxDrawdown,omitempty"`
-	SwitchBuffer           float64 `json:"switchBuffer,omitempty"`
-	MinLeverage            float64 `json:"minLeverage,omitempty"`
-	MaxLeverage            float64 `json:"maxLeverage,omitempty"`
-	ProfitWithdrawRatio    float64 `json:"profitWithdrawRatio,omitempty"`
+	// MaxMarginRatio updates the active max margin ratio when greater than zero.
+	MaxMarginRatio float64 `json:"maxMarginRatio,omitempty"`
+	// MinLotHaircutRatio updates the lot haircut when greater than zero.
+	MinLotHaircutRatio float64 `json:"minLotHaircutRatio,omitempty"`
+	// MaxConcurrentPositions updates the active position cap when greater than zero.
+	MaxConcurrentPositions int `json:"maxConcurrentPositions,omitempty"`
+	// MaxDrawdown updates the drawdown guard when greater than zero.
+	MaxDrawdown float64 `json:"maxDrawdown,omitempty"`
+	// SwitchBuffer updates the router switch buffer when greater than zero.
+	SwitchBuffer float64 `json:"switchBuffer,omitempty"`
+	// MinLeverage updates the minimum leverage when greater than zero.
+	MinLeverage float64 `json:"minLeverage,omitempty"`
+	// MaxLeverage updates the maximum leverage when greater than zero.
+	MaxLeverage float64 `json:"maxLeverage,omitempty"`
+	// ProfitWithdrawRatio sets the current profit withdrawal ratio.
+	ProfitWithdrawRatio float64 `json:"profitWithdrawRatio,omitempty"`
 }
 
+// WithdrawalRequest asks the router to make room for a venue withdrawal.
 type WithdrawalRequest struct {
-	Venue    string  `json:"venue,omitempty"`
-	Currency string  `json:"currency"`
-	Amount   float64 `json:"amount"`
-	Reason   string  `json:"reason,omitempty"`
+	// Venue optionally overrides the manager venue.
+	Venue string `json:"venue,omitempty"`
+	// Currency is the settlement currency to withdraw.
+	Currency string `json:"currency"`
+	// Amount is the requested currency amount.
+	Amount float64 `json:"amount"`
+	// Reason is an optional user-facing explanation.
+	Reason string `json:"reason,omitempty"`
 }
 
 // SignalsManagerConfig configures one Bollinger-router basket subscription.
@@ -141,6 +163,8 @@ type SignalsManager struct {
 	errorSubscribers      map[chan error]struct{}
 }
 
+// NewSignalsManager creates a basket manager from a transport, durable state,
+// and subscription configuration.
 func NewSignalsManager(client SignalsClient, state SignalsManagerState, cfg SignalsManagerConfig) *SignalsManager {
 	cfg = normalizeSignalsManagerConfig(cfg)
 	buffer := cfg.BufferSize
@@ -314,6 +338,7 @@ func (m *SignalsManager) Run(ctx context.Context) error {
 	}
 }
 
+// Subscribe sends the configured basket subscription without starting the run loop.
 func (m *SignalsManager) Subscribe(ctx context.Context) error {
 	return m.subscribe(ctx)
 }
@@ -383,6 +408,7 @@ func (m *SignalsManager) Events() <-chan Event { return m.events }
 // SubscribeErrors for fan-out listeners.
 func (m *SignalsManager) Errors() <-chan error { return m.errors }
 
+// SubscribeIntents returns a fan-out stream of server-created market order intents.
 func (m *SignalsManager) SubscribeIntents(ctx context.Context) <-chan Intent {
 	ch := make(chan Intent, m.subscriberBuffer())
 	m.mu.Lock()
@@ -392,6 +418,7 @@ func (m *SignalsManager) SubscribeIntents(ctx context.Context) <-chan Intent {
 	return ch
 }
 
+// SubscribeProtectionUpdates returns a fan-out stream of TP/SL update events.
 func (m *SignalsManager) SubscribeProtectionUpdates(ctx context.Context) <-chan UpdateTPSLEvent {
 	ch := make(chan UpdateTPSLEvent, m.subscriberBuffer())
 	m.mu.Lock()
@@ -401,6 +428,7 @@ func (m *SignalsManager) SubscribeProtectionUpdates(ctx context.Context) <-chan 
 	return ch
 }
 
+// SubscribeWithdrawals returns a fan-out stream of withdrawal events.
 func (m *SignalsManager) SubscribeWithdrawals(ctx context.Context) <-chan WithdrawEvent {
 	ch := make(chan WithdrawEvent, m.subscriberBuffer())
 	m.mu.Lock()
@@ -410,6 +438,7 @@ func (m *SignalsManager) SubscribeWithdrawals(ctx context.Context) <-chan Withdr
 	return ch
 }
 
+// SubscribeBacktests returns a fan-out stream of scheduled backtest events.
 func (m *SignalsManager) SubscribeBacktests(ctx context.Context) <-chan BacktestEvent {
 	ch := make(chan BacktestEvent, m.subscriberBuffer())
 	m.mu.Lock()
@@ -419,6 +448,7 @@ func (m *SignalsManager) SubscribeBacktests(ctx context.Context) <-chan Backtest
 	return ch
 }
 
+// SubscribeMessages returns a fan-out stream of informational lifecycle events.
 func (m *SignalsManager) SubscribeMessages(ctx context.Context) <-chan InfoEvent {
 	ch := make(chan InfoEvent, m.subscriberBuffer())
 	m.mu.Lock()
@@ -428,6 +458,7 @@ func (m *SignalsManager) SubscribeMessages(ctx context.Context) <-chan InfoEvent
 	return ch
 }
 
+// SubscribeManagerEvents returns a fan-out stream of every accepted manager event.
 func (m *SignalsManager) SubscribeManagerEvents(ctx context.Context) <-chan Event {
 	ch := make(chan Event, m.subscriberBuffer())
 	m.mu.Lock()
@@ -437,6 +468,7 @@ func (m *SignalsManager) SubscribeManagerEvents(ctx context.Context) <-chan Even
 	return ch
 }
 
+// SubscribeErrors returns a fan-out stream of asynchronous manager errors.
 func (m *SignalsManager) SubscribeErrors(ctx context.Context) <-chan error {
 	ch := make(chan error, m.subscriberBuffer())
 	m.mu.Lock()
@@ -446,12 +478,14 @@ func (m *SignalsManager) SubscribeErrors(ctx context.Context) <-chan error {
 	return ch
 }
 
+// SubscriptionID returns the active server subscription id, or zero before subscribe.
 func (m *SignalsManager) SubscriptionID() int64 {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.subscriptionID
 }
 
+// UpdateAsset records and, once subscribed, publishes one account asset snapshot.
 func (m *SignalsManager) UpdateAsset(asset AssetSnapshot) {
 	if m == nil {
 		return
@@ -478,6 +512,7 @@ func (m *SignalsManager) UpdateAsset(asset AssetSnapshot) {
 	}
 }
 
+// UpdatePosition records and, once subscribed, publishes one venue position snapshot.
 func (m *SignalsManager) UpdatePosition(position Position) {
 	if m == nil {
 		return
@@ -515,6 +550,7 @@ func (m *SignalsManager) UpdatePosition(position Position) {
 	}
 }
 
+// AddInstrument adds an instrument locally and to the live subscription.
 func (m *SignalsManager) AddInstrument(ctx context.Context, instrument string) error {
 	instrument = NormalizeInstrument(instrument)
 	if instrument == "" {
@@ -530,6 +566,7 @@ func (m *SignalsManager) AddInstrument(ctx context.Context, instrument string) e
 	return nil
 }
 
+// RemoveInstrument removes an instrument locally and from the live subscription.
 func (m *SignalsManager) RemoveInstrument(ctx context.Context, instrument string) error {
 	instrument = NormalizeInstrument(instrument)
 	if instrument == "" {
@@ -551,6 +588,7 @@ func (m *SignalsManager) RemoveInstrument(ctx context.Context, instrument string
 	return nil
 }
 
+// UpdateConfig applies and optionally sends a runtime router config patch.
 func (m *SignalsManager) UpdateConfig(ctx context.Context, cfg RuntimeConfig) error {
 	if m == nil {
 		return nil
@@ -567,6 +605,7 @@ func (m *SignalsManager) UpdateConfig(ctx context.Context, cfg RuntimeConfig) er
 	return nil
 }
 
+// ScheduleWithdrawal schedules a withdrawal through the live router subscription.
 func (m *SignalsManager) ScheduleWithdrawal(ctx context.Context, withdrawal WithdrawalRequest) error {
 	if m == nil {
 		return nil
@@ -585,6 +624,7 @@ func (m *SignalsManager) ScheduleWithdrawal(ctx context.Context, withdrawal With
 	return m.client.ScheduleWithdrawal(ctx, subscriptionID, withdrawal)
 }
 
+// Assets returns current asset snapshots sorted by currency.
 func (m *SignalsManager) Assets() []AssetSnapshot {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -596,6 +636,7 @@ func (m *SignalsManager) Assets() []AssetSnapshot {
 	return out
 }
 
+// Positions returns current open position snapshots sorted by venue/instrument.
 func (m *SignalsManager) Positions() []Position {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -612,6 +653,7 @@ func (m *SignalsManager) Positions() []Position {
 	return out
 }
 
+// AvailableOrderCash returns available cash after applying the asset MaxUsage cap.
 func (m *SignalsManager) AvailableOrderCash(currency string) float64 {
 	currency = strings.ToUpper(strings.TrimSpace(currency))
 	m.mu.RLock()
@@ -620,6 +662,7 @@ func (m *SignalsManager) AvailableOrderCash(currency string) float64 {
 	return math.Max(0, asset.Available) * clamp01(positiveOr(asset.MaxUsage, 1))
 }
 
+// State returns durable state suitable for restart hydration.
 func (m *SignalsManager) State() SignalsManagerState {
 	return SignalsManagerState{Assets: m.Assets(), Positions: m.Positions()}
 }
