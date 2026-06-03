@@ -99,6 +99,7 @@ type Position struct {
 	TrailingStopActivation float64
 	TrailingStopDistance   float64
 	TrailingStopMinProfit  float64
+	Margin                 float64
 	Leverage               float64
 	MFE                    float64
 	MAE                    float64
@@ -181,7 +182,9 @@ type CreateMarketOrderEvent struct {
 	Side            Side      `json:"side"`
 	OrderType       string    `json:"orderType,omitempty"`
 	ContractSize    float64   `json:"contractSize,omitempty"`
+	Margin          float64   `json:"margin,omitempty"`
 	Leverage        float64   `json:"leverage,omitempty"`
+	Confidence      float64   `json:"confidence,omitempty"`
 	ReduceOnly      bool      `json:"reduceOnly,omitempty"`
 	TakeProfitPrice float64   `json:"takeProfitPrice,omitempty"`
 	StopLossPrice   float64   `json:"stopLossPrice,omitempty"`
@@ -379,7 +382,9 @@ type serverMessage struct {
 	Side            Side            `json:"side,omitempty"`
 	OrderType       string          `json:"orderType,omitempty"`
 	ContractSize    float64         `json:"contractSize,omitempty"`
+	Margin          float64         `json:"margin,omitempty"`
 	Leverage        float64         `json:"leverage,omitempty"`
+	Confidence      float64         `json:"confidence,omitempty"`
 	ReduceOnly      bool            `json:"reduceOnly,omitempty"`
 	TakeProfitPrice float64         `json:"takeProfitPrice,omitempty"`
 	StopLossPrice   float64         `json:"stopLossPrice,omitempty"`
@@ -418,7 +423,9 @@ func ParseEvent(data []byte) (Event, error) {
 			Side:            msg.Side,
 			OrderType:       msg.OrderType,
 			ContractSize:    msg.ContractSize,
+			Margin:          msg.Margin,
 			Leverage:        msg.Leverage,
+			Confidence:      msg.Confidence,
 			ReduceOnly:      msg.ReduceOnly,
 			TakeProfitPrice: msg.TakeProfitPrice,
 			StopLossPrice:   msg.StopLossPrice,

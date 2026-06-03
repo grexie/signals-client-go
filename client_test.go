@@ -68,7 +68,7 @@ func TestParseInfoAndErrorEvents(t *testing.T) {
 }
 
 func TestParseOrderRouterEvents(t *testing.T) {
-	orderEvent, err := ParseEvent([]byte(`{"type":"create-market-order","subscriptionId":12,"intentId":"intent_1","reason":"preempted_by_better_route","venue":"okx","instrument":"BTC-USDT-SWAP","side":"buy","orderType":"market","contractSize":3,"leverage":2}`))
+	orderEvent, err := ParseEvent([]byte(`{"type":"create-market-order","subscriptionId":12,"intentId":"intent_1","reason":"preempted_by_better_route","venue":"okx","instrument":"BTC-USDT-SWAP","side":"buy","orderType":"market","contractSize":3,"margin":125.5,"leverage":2,"confidence":0.73}`))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestParseOrderRouterEvents(t *testing.T) {
 	if !ok {
 		t.Fatalf("expected CreateMarketOrderEvent, got %T", orderEvent)
 	}
-	if order.SubscriptionID != 12 || order.IntentID != "intent_1" || order.Reason != "preempted_by_better_route" || order.Side != SideBuy || order.ContractSize != 3 || order.Leverage != 2 {
+	if order.SubscriptionID != 12 || order.IntentID != "intent_1" || order.Reason != "preempted_by_better_route" || order.Side != SideBuy || order.ContractSize != 3 || order.Margin != 125.5 || order.Leverage != 2 || order.Confidence != 0.73 {
 		t.Fatalf("unexpected order event: %+v", order)
 	}
 

@@ -434,6 +434,9 @@ func (c *WebSocketSignalsClient) closeStreams() {
 }
 
 func positionMargin(position Position) float64 {
+	if position.Margin > 0 {
+		return position.Margin
+	}
 	if position.Leverage <= 0 || position.EntryPrice <= 0 {
 		return 0
 	}

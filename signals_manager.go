@@ -91,7 +91,9 @@ type Intent struct {
 	Side            Side
 	OrderType       string
 	ContractSize    float64
+	Margin          float64
 	Leverage        float64
+	Confidence      float64
 	ReduceOnly      bool
 	TakeProfit      float64
 	StopLoss        float64
@@ -564,7 +566,9 @@ func (m *SignalsManager) handleEvent(ctx context.Context, event Event) {
 			Side:            ev.Side,
 			OrderType:       ev.OrderType,
 			ContractSize:    ev.ContractSize,
+			Margin:          ev.Margin,
 			Leverage:        ev.Leverage,
+			Confidence:      ev.Confidence,
 			ReduceOnly:      ev.ReduceOnly,
 			TakeProfit:      ev.TakeProfit,
 			StopLoss:        ev.StopLoss,

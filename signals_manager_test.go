@@ -65,6 +65,9 @@ func TestSignalsManagerFanoutSubscriptionsCloseWithContext(t *testing.T) {
 		Instrument:     "BTC-USDT-SWAP",
 		Side:           SideBuy,
 		ContractSize:   2,
+		Margin:         125.5,
+		Leverage:       1.46,
+		Confidence:     0.73,
 	})
 	manager.handleEvent(context.Background(), WithdrawEvent{
 		SubscriptionID: 5,
@@ -218,10 +221,13 @@ func TestSignalsManagerFiltersSharedClientEventsBySubscription(t *testing.T) {
 		Instrument:     "BTC-USDT-SWAP",
 		Side:           SideBuy,
 		ContractSize:   2,
+		Margin:         125.5,
+		Leverage:       1.46,
+		Confidence:     0.73,
 	}
 	select {
 	case intent := <-intents:
-		if intent.IntentID != "right_basket" || intent.ContractSize != 2 {
+		if intent.IntentID != "right_basket" || intent.ContractSize != 2 || intent.Margin != 125.5 || intent.Leverage != 1.46 || intent.Confidence != 0.73 {
 			t.Fatalf("unexpected intent: %+v", intent)
 		}
 	case <-time.After(time.Second):
