@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"log"
+	"math"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -68,26 +70,50 @@ func (c *ReconnectingSignalsClient) Subscribe(ctx context.Context, request Subsc
 	c.mu.Unlock()
 	if transport != nil {
 		if _, err := transport.Subscribe(ctx, request); err != nil {
-			c.mu.Lock()
-			delete(c.subscriptions, localID)
-			delete(c.localToServer, localID)
-			c.mu.Unlock()
-			return 0, err
+			c.closeTransport(transport)
 		}
 	}
 	return localID, nil
 }
 
 func (c *ReconnectingSignalsClient) UpdateAsset(ctx context.Context, subscriptionID int64, asset AssetSnapshot) error {
-	if transport, serverID := c.transportFor(subscriptionID); transport != nil && serverID > 0 {
-		return transport.UpdateAsset(ctx, serverID, asset)
+	c.mu.Lock()
+	if req, ok := c.subscriptions[subscriptionID]; ok {
+		if normalized, ok := normalizeReconnectAsset(req, asset); ok {
+			req.Assets = upsertReconnectAsset(req.Assets, normalized)
+			c.subscriptions[subscriptionID] = req
+			asset = normalized
+		}
+	}
+	transport := c.transport
+	serverID := c.localToServer[subscriptionID]
+	c.mu.Unlock()
+	if transport != nil && serverID > 0 {
+		if err := transport.UpdateAsset(ctx, serverID, asset); err != nil {
+			c.closeTransport(transport)
+			return nil
+		}
 	}
 	return nil
 }
 
 func (c *ReconnectingSignalsClient) UpdatePosition(ctx context.Context, subscriptionID int64, position Position) error {
-	if transport, serverID := c.transportFor(subscriptionID); transport != nil && serverID > 0 {
-		return transport.UpdatePosition(ctx, serverID, position)
+	c.mu.Lock()
+	if req, ok := c.subscriptions[subscriptionID]; ok {
+		if normalized, ok := normalizeReconnectPosition(req, position); ok {
+			req.Positions = upsertReconnectPosition(req.Positions, normalized)
+			c.subscriptions[subscriptionID] = req
+			position = normalized
+		}
+	}
+	transport := c.transport
+	serverID := c.localToServer[subscriptionID]
+	c.mu.Unlock()
+	if transport != nil && serverID > 0 {
+		if err := transport.UpdatePosition(ctx, serverID, position); err != nil {
+			c.closeTransport(transport)
+			return nil
+		}
 	}
 	return nil
 }
@@ -102,7 +128,10 @@ func (c *ReconnectingSignalsClient) AddInstrument(ctx context.Context, subscript
 	serverID := c.localToServer[subscriptionID]
 	c.mu.Unlock()
 	if transport != nil && serverID > 0 {
-		return transport.AddInstrument(ctx, serverID, instrument)
+		if err := transport.AddInstrument(ctx, serverID, instrument); err != nil {
+			c.closeTransport(transport)
+			return nil
+		}
 	}
 	return nil
 }
@@ -124,7 +153,10 @@ func (c *ReconnectingSignalsClient) RemoveInstrument(ctx context.Context, subscr
 	serverID := c.localToServer[subscriptionID]
 	c.mu.Unlock()
 	if transport != nil && serverID > 0 {
-		return transport.RemoveInstrument(ctx, serverID, instrument)
+		if err := transport.RemoveInstrument(ctx, serverID, instrument); err != nil {
+			c.closeTransport(transport)
+			return nil
+		}
 	}
 	return nil
 }
@@ -141,7 +173,10 @@ func (c *ReconnectingSignalsClient) UpdateConfig(ctx context.Context, subscripti
 	serverID := c.localToServer[subscriptionID]
 	c.mu.Unlock()
 	if transport != nil && serverID > 0 {
-		return transport.UpdateConfig(ctx, serverID, cfg)
+		if err := transport.UpdateConfig(ctx, serverID, cfg); err != nil {
+			c.closeTransport(transport)
+			return nil
+		}
 	}
 	return nil
 }
@@ -164,7 +199,10 @@ func (c *ReconnectingSignalsClient) Unsubscribe(ctx context.Context, subscriptio
 	}
 	c.mu.Unlock()
 	if transport != nil && serverID > 0 {
-		return transport.Unsubscribe(ctx, serverID)
+		if err := transport.Unsubscribe(ctx, serverID); err != nil {
+			c.closeTransport(transport)
+			return nil
+		}
 	}
 	return nil
 }
@@ -208,6 +246,20 @@ func (c *ReconnectingSignalsClient) transportFor(localID int64) (*WebSocketSigna
 	return c.transport, c.localToServer[localID]
 }
 
+func (c *ReconnectingSignalsClient) closeTransport(transport *WebSocketSignalsClient) {
+	if transport == nil {
+		return
+	}
+	c.mu.Lock()
+	if c.transport == transport {
+		c.transport = nil
+		c.localToServer = make(map[int64]int64)
+		c.serverToLocal = make(map[int64]int64)
+	}
+	c.mu.Unlock()
+	_ = transport.Close()
+}
+
 func (c *ReconnectingSignalsClient) run(ctx context.Context) {
 	backoff := time.Second
 	for {
@@ -219,7 +271,7 @@ func (c *ReconnectingSignalsClient) run(ctx context.Context) {
 		}
 		transport := NewWebSocketSignalsClient(c.token, c.opts...)
 		if err := transport.Connect(ctx); err != nil {
-			c.broadcastError(err)
+			log.Printf("signals websocket reconnect pending: %v", err)
 			time.Sleep(backoff)
 			backoff = minDuration(backoff*2, 30*time.Second)
 			continue
@@ -235,7 +287,9 @@ func (c *ReconnectingSignalsClient) run(ctx context.Context) {
 		c.mu.Unlock()
 		for _, req := range requests {
 			if _, err := transport.Subscribe(ctx, req); err != nil {
-				c.broadcastError(err)
+				log.Printf("signals websocket resubscribe pending: %v", err)
+				c.closeTransport(transport)
+				break
 			}
 		}
 		backoff = time.Second
@@ -267,7 +321,6 @@ func (c *ReconnectingSignalsClient) readTransport(ctx context.Context, transport
 				return
 			}
 			if err != nil {
-				c.broadcastError(err)
 				log.Printf("signals websocket: %v", err)
 				return
 			}
@@ -377,4 +430,54 @@ func (c *ReconnectingSignalsClient) broadcastError(err error) {
 		default:
 		}
 	}
+}
+
+func normalizeReconnectAsset(req SubscribeRequest, asset AssetSnapshot) (AssetSnapshot, bool) {
+	asset.Venue = NormalizeVenue(firstNonEmpty(asset.Venue, req.Venue))
+	asset.Currency = strings.ToUpper(strings.TrimSpace(asset.Currency))
+	asset.MaxUsage = clamp01(positiveOr(asset.MaxUsage, 1))
+	return asset, asset.Currency != ""
+}
+
+func upsertReconnectAsset(assets []AssetSnapshot, asset AssetSnapshot) []AssetSnapshot {
+	for i := range assets {
+		if strings.EqualFold(assets[i].Currency, asset.Currency) {
+			assets[i] = asset
+			return assets
+		}
+	}
+	return append(assets, asset)
+}
+
+func normalizeReconnectPosition(req SubscribeRequest, position Position) (Position, bool) {
+	position.Venue = NormalizeVenue(firstNonEmpty(position.Venue, req.Venue))
+	position.Instrument = NormalizeInstrument(position.Instrument)
+	position.Status = strings.ToLower(strings.TrimSpace(position.Status))
+	if position.Status == "" && math.Abs(position.Size) > floatTolerance {
+		position.Status = "open"
+	}
+	if position.LastPrice <= 0 {
+		position.LastPrice = position.EntryPrice
+	}
+	return position, position.Instrument != ""
+}
+
+func upsertReconnectPosition(positions []Position, position Position) []Position {
+	key := positionKey(position.Venue, position.Instrument)
+	next := positions[:0]
+	replaced := false
+	for _, current := range positions {
+		if positionKey(current.Venue, current.Instrument) == key {
+			replaced = true
+			if position.Status != "closed" && math.Abs(position.Size) > floatTolerance {
+				next = append(next, position)
+			}
+			continue
+		}
+		next = append(next, current)
+	}
+	if !replaced && position.Status != "closed" && math.Abs(position.Size) > floatTolerance {
+		next = append(next, position)
+	}
+	return next
 }
